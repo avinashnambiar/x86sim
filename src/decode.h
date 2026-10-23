@@ -29,8 +29,18 @@
     X(UD2, "ud2") X(XLAT, "xlat") X(IN, "in") X(OUT, "out") \
     X(DAA, "daa") X(DAS, "das") X(AAA, "aaa") X(AAS, "aas") X(AAM, "aam") X(AAD, "aad") X(SALC, "salc") \
     X(LES, "les") X(LDS, "lds") X(LSS, "lss") X(LFS, "lfs") X(LGS, "lgs") X(BOUND, "bound") X(ARPL, "arpl") \
+    X(CRC32, "crc32") X(MOVBE, "movbe") \
     X(FWAIT, "fwait") X(X87, "(x87)") \
-    X(GRP6, "(grp6)") X(GRP7R, "(grp7)") X(SGDT, "sgdt") X(SIDT, "sidt") X(LGDT, "lgdt") X(LIDT, "lidt") \
+    X(SLDT, "sldt") X(STR, "str") X(LLDT, "lldt") X(LTR, "ltr") X(VERR, "verr") X(VERW, "verw") \
+    X(LAR, "lar") X(LSL, "lsl") X(CLTS, "clts") X(SYSRET, "sysret") X(SYSEXIT, "sysexit") \
+    X(INVD, "invd") X(WBINVD, "wbinvd") X(MOVCR, "mov") X(MOVDR, "mov") X(WRMSR, "wrmsr") X(RDMSR, "rdmsr") \
+    X(RDPMC, "rdpmc") X(RSM, "rsm") X(UD0, "ud0") X(UD1, "ud1") X(INVPCID, "invpcid") \
+    X(RDFSBASE, "rdfsbase") X(RDGSBASE, "rdgsbase") X(WRFSBASE, "wrfsbase") X(WRGSBASE, "wrgsbase") \
+    X(RDPID, "rdpid") \
+    X(ENDBR64, "endbr64") X(ENDBR32, "endbr32") X(RDSSP, "rdssp") X(INCSSP, "incssp") X(RSTORSSP, "rstorssp") \
+    X(SAVEPREVSSP, "saveprevssp") X(SETSSBSY, "setssbsy") X(CLRSSBSY, "clrssbsy") X(WRSS, "wrss") X(WRUSS, "wruss") \
+    X(ADCX, "adcx") X(ADOX, "adox") \
+    X(GRP7R, "(grp7)") X(SGDT, "sgdt") X(SIDT, "sidt") X(LGDT, "lgdt") X(LIDT, "lidt") \
     X(SMSW, "smsw") X(LMSW, "lmsw") X(INVLPG, "invlpg") \
     X(PREFETCH, "prefetch") X(FXSAVE, "fxsave") X(FXRSTOR, "fxrstor") X(LDMXCSR, "ldmxcsr") X(STMXCSR, "stmxcsr") \
     X(XSAVE, "xsave") X(XRSTOR, "xrstor") X(XSAVEOPT, "xsaveopt") X(CLFLUSH, "clflush") \
@@ -58,6 +68,43 @@
     X(MOVMSKPS, "movmskps") X(MOVMSKPD, "movmskpd") X(UNPCKLPS, "unpcklps") X(UNPCKLPD, "unpcklpd") \
     X(UNPCKHPS, "unpckhps") X(UNPCKHPD, "unpckhpd") X(MOVLPS, "movlps") X(MOVLPD, "movlpd") \
     X(MOVHPS, "movhps") X(MOVHPD, "movhpd") X(MOVNTPS, "movntps") X(MOVNTPD, "movntpd") X(MOVNTDQ, "movntdq") \
+    X(ADDPS, "addps") X(ADDPD, "addpd") X(ADDSS, "addss") X(ADDSD, "addsd") X(SUBPS, "subps") \
+    X(SUBPD, "subpd") X(SUBSS, "subss") X(SUBSD, "subsd") X(MULPS, "mulps") X(MULPD, "mulpd") \
+    X(MULSS, "mulss") X(MULSD, "mulsd") X(DIVPS, "divps") X(DIVPD, "divpd") X(DIVSS, "divss") \
+    X(DIVSD, "divsd") X(MINPS, "minps") X(MINPD, "minpd") X(MINSS, "minss") X(MINSD, "minsd") \
+    X(MAXPS, "maxps") X(MAXPD, "maxpd") X(MAXSS, "maxss") X(MAXSD, "maxsd") X(SQRTPS, "sqrtps") \
+    X(SQRTPD, "sqrtpd") X(SQRTSS, "sqrtss") X(SQRTSD, "sqrtsd") X(RSQRTPS, "rsqrtps") X(RSQRTSS, "rsqrtss") \
+    X(RCPPS, "rcpps") X(RCPSS, "rcpss") X(CMPPS, "cmpps") X(CMPPD, "cmppd") X(CMPSS, "cmpss") \
+    X(CMPSD_X, "cmpsd") X(UCOMISS, "ucomiss") X(UCOMISD, "ucomisd") X(COMISS, "comiss") X(COMISD, "comisd") \
+    X(CVTPI2PS, "cvtpi2ps") X(CVTPI2PD, "cvtpi2pd") X(CVTSI2SS, "cvtsi2ss") X(CVTSI2SD, "cvtsi2sd") \
+    X(CVTTPS2PI, "cvttps2pi") X(CVTTPD2PI, "cvttpd2pi") X(CVTTSS2SI, "cvttss2si") X(CVTTSD2SI, "cvttsd2si") \
+    X(CVTPS2PI, "cvtps2pi") X(CVTPD2PI, "cvtpd2pi") X(CVTSS2SI, "cvtss2si") X(CVTSD2SI, "cvtsd2si") \
+    X(CVTPS2PD, "cvtps2pd") X(CVTPD2PS, "cvtpd2ps") X(CVTSS2SD, "cvtss2sd") X(CVTSD2SS, "cvtsd2ss") \
+    X(CVTDQ2PS, "cvtdq2ps") X(CVTPS2DQ, "cvtps2dq") X(CVTTPS2DQ, "cvttps2dq") X(CVTTPD2DQ, "cvttpd2dq") \
+    X(CVTDQ2PD, "cvtdq2pd") X(CVTPD2DQ, "cvtpd2dq") X(ADDSUBPS, "addsubps") X(ADDSUBPD, "addsubpd") \
+    X(HADDPS, "haddps") X(HADDPD, "haddpd") X(HSUBPS, "hsubps") X(HSUBPD, "hsubpd") X(MOVSLDUP, "movsldup") \
+    X(MOVSHDUP, "movshdup") X(MOVDDUP, "movddup") X(LDDQU, "lddqu") X(EMMS, "emms") X(PSHUFW, "pshufw") \
+    X(MOVNTQ, "movntq") X(MASKMOVQ, "maskmovq") X(MOVQ2DQ, "movq2dq") X(MOVDQ2Q, "movdq2q") \
+    X(PSHUFB, "pshufb") X(PHADDW, "phaddw") X(PHADDD, "phaddd") X(PHADDSW, "phaddsw") \
+    X(PMADDUBSW, "pmaddubsw") X(PHSUBW, "phsubw") X(PHSUBD, "phsubd") X(PHSUBSW, "phsubsw") \
+    X(PSIGNB, "psignb") X(PSIGNW, "psignw") X(PSIGND, "psignd") X(PMULHRSW, "pmulhrsw") X(PABSB, "pabsb") \
+    X(PABSW, "pabsw") X(PABSD, "pabsd") X(PALIGNR, "palignr") X(PBLENDVB, "pblendvb") X(BLENDVPS, "blendvps") \
+    X(BLENDVPD, "blendvpd") X(PTEST, "ptest") X(PMOVSXBW, "pmovsxbw") X(PMOVSXBD, "pmovsxbd") \
+    X(PMOVSXBQ, "pmovsxbq") X(PMOVSXWD, "pmovsxwd") X(PMOVSXWQ, "pmovsxwq") X(PMOVSXDQ, "pmovsxdq") \
+    X(PMULDQ, "pmuldq") X(PCMPEQQ, "pcmpeqq") X(MOVNTDQA, "movntdqa") X(PACKUSDW, "packusdw") \
+    X(PMOVZXBW, "pmovzxbw") X(PMOVZXBD, "pmovzxbd") X(PMOVZXBQ, "pmovzxbq") X(PMOVZXWD, "pmovzxwd") \
+    X(PMOVZXWQ, "pmovzxwq") X(PMOVZXDQ, "pmovzxdq") X(PCMPGTQ, "pcmpgtq") X(PMINSB, "pminsb") \
+    X(PMINSD, "pminsd") X(PMINUW, "pminuw") X(PMINUD, "pminud") X(PMAXSB, "pmaxsb") X(PMAXSD, "pmaxsd") \
+    X(PMAXUW, "pmaxuw") X(PMAXUD, "pmaxud") X(PMULLD, "pmulld") X(PHMINPOSUW, "phminposuw") \
+    X(ROUNDPS, "roundps") X(ROUNDPD, "roundpd") X(ROUNDSS, "roundss") X(ROUNDSD, "roundsd") \
+    X(BLENDPS, "blendps") X(BLENDPD, "blendpd") X(PBLENDW, "pblendw") X(PEXTRB, "pextrb") X(PEXTRD, "pextrd") \
+    X(EXTRACTPS, "extractps") X(PINSRB, "pinsrb") X(INSERTPS, "insertps") X(PINSRD, "pinsrd") X(DPPS, "dpps") \
+    X(DPPD, "dppd") X(MPSADBW, "mpsadbw") X(PCMPESTRM, "pcmpestrm") X(PCMPESTRI, "pcmpestri") \
+    X(PCMPISTRM, "pcmpistrm") X(PCMPISTRI, "pcmpistri") X(AESENC, "aesenc") X(AESENCLAST, "aesenclast") \
+    X(AESDEC, "aesdec") X(AESDECLAST, "aesdeclast") X(AESIMC, "aesimc") X(AESKEYGENASSIST, "aeskeygenassist") \
+    X(PCLMULQDQ, "pclmulqdq") X(SHA1RNDS4, "sha1rnds4") X(SHA1NEXTE, "sha1nexte") X(SHA1MSG1, "sha1msg1") \
+    X(SHA1MSG2, "sha1msg2") X(SHA256RNDS2, "sha256rnds2") X(SHA256MSG1, "sha256msg1") \
+    X(SHA256MSG2, "sha256msg2") \
     X(MOVNTI, "movnti") \
     X(VEX, "(vex)") X(EVEX, "(evex)")
 
@@ -83,6 +130,9 @@ enum {
     O_1,
     O_ES, O_CS, O_SS, O_DS, O_FS, O_GS,
     O_Vx, O_Wx, O_Wq, O_Wd, O_Ux,           /* SSE: xmm reg, xmm/mem128, xmm/m64, xmm/m32, xmm reg only */
+    O_Ww,                                   /* xmm/m16 */
+    O_Pq, O_Qq, O_Nq,                       /* MMX: mm reg, mm/m64, mm reg only */
+    O_Cd, O_Dd, O_Ry,                       /* control/debug register (ModRM reg), GPR in ModRM r/m */
     O_COUNT
 };
 
@@ -120,7 +170,22 @@ enum { DEC_OK = 0, DEC_INVALID = -1, DEC_TRUNC = -2 };
 /* Decode one instruction from buf (avail bytes). On DEC_INVALID, in->len is
  * still set when the length could be determined. */
 int decode(const uint8_t *buf, int avail, uint64_t addr, int mode, Insn *in);
-int opnd_size(const Insn *in, int spec);
+enum { OK_OS = -1, OK_Y = -2, OK_MODE = -3, OK_EAX = -4, OK_MP = -5, OK_MQ = -6 };
+extern const int8_t opnd_kind[O_COUNT];
+/* Size in bytes of an operand of the given spec (0 for none / no size). */
+static inline int opnd_size(const Insn *in, int spec) {
+    int k = opnd_kind[spec];
+    if (k >= 0) return k;
+    int os = in->opsize;
+    switch (k) {
+    case OK_OS: return os;
+    case OK_Y: return os == 8 ? 8 : 4;
+    case OK_MODE: return in->mode == 64 ? 8 : 4;
+    case OK_EAX: return os == 2 ? 2 : 4;
+    case OK_MP: return os + 2;
+    default: return (in->rex & 8) ? 16 : 8;
+    }
+}
 int opnd_is_mem(const Insn *in, int spec);
 extern const char *const mnemonic_names[I_COUNT];
 extern const char *const cc_names[16];

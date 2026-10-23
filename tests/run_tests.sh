@@ -76,7 +76,12 @@ for src in tests/c/*.c; do
             clang $flags $COMMON -c runtime/sim_libc.c -o "$o.lib.o" || { echo "build of $t ($cfg) failed"; exit 1; }
         $SIM -m 4000000000 "$o.o" "$o.lib.o" -- $args > "$o.got" 2> "$o.err"
         rc=$?
-        check "$t [$cfg]" "$OUT/$t.exp" $exp_rc "$o.got" $rc
+        exp="$OUT/$t.exp"
+        if [ "${cfg#i386}" != "$cfg" ] && grep -q '^x64:' "$exp"; then
+            grep -v '^x64:' "$exp" > "$OUT/$t.exp32"  # x86-64-only results
+            exp="$OUT/$t.exp32"
+        fi
+        check "$t [$cfg]" "$exp" $exp_rc "$o.got" $rc
         [ -s "$o.err" ] && sed 's/^/      /' "$o.err" | head -5
     done
 done

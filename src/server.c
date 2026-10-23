@@ -10,7 +10,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "cache.h"
 #include "machine.h"
+#include "pc.h"
 
 #define RUN_CHUNK 3000000ULL
 
@@ -100,7 +102,7 @@ static const char *state_name(int s) {
 }
 
 static void api_state(Machine *m, Buf *b) {
-    CPU *c = &m->cpu;
+    CPU *c = machine_cpu(m);
     static const char *names[16] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
                                     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
     static const int order[16] = {RAX, RBX, RCX, RDX, RSI, RDI, RBP, RSP, R8, R9, R10, R11, R12, R13, R14, R15};
@@ -108,9 +110,22 @@ static void api_state(Machine *m, Buf *b) {
     buf_printf(b, "{\"state\":\"%s\",\"stop\":\"%s\",\"status\":", state_name(m->state), stop_reason_name(m->last_stop));
     json_str(b, m->status);
     buf_printf(b, ",\"bits\":%d,\"os\":\"%s\",\"icount\":%llu,\"exit_code\":%d,\"rip\":", m->bits,
-               m->os == OS_LINUX ? "linux" : m->os == OS_DOS ? "dos" : "none", (unsigned long long)c->icount,
-               m->exit_code);
+               m->os == OS_LINUX ? "linux" : m->os == OS_DOS ? "dos" : m->os == OS_PC ? "pc" : "none",
+               (unsigned long long)c->icount, m->exit_code);
     json_hex(b, c->rip);
+    if (c->sys) {
+        const char *mode = !(c->cr0 & CR0_PE) ? "real" : (c->rflags & FL_VM) ? "vm86"
+                         : c->bits == 64 ? "long" : (c->efer & EFER_LMA) ? "compat" : "protected";
+        buf_printf(b, ",\"sys\":{\"mode\":\"%s\",\"cpl\":%d,\"paging\":%s,\"time_ns\":%llu", mode, c->cpl,
+                   (c->cr0 & CR0_PG) ? "true" : "false", (unsigned long long)pc_time_ns(m));
+        const char *cn[] = {"cr0", "cr2", "cr3", "cr4", "efer"};
+        uint64_t cv[] = {c->cr0, c->cr2, c->cr3, c->cr4, c->efer};
+        for (int i = 0; i < 5; i++) {
+            buf_printf(b, ",\"%s\":", cn[i]);
+            json_hex(b, cv[i]);
+        }
+        buf_printf(b, "}");
+    }
     machine_symname(m, c->rip, sym, sizeof sym);
     buf_printf(b, ",\"where\":");
     json_str(b, sym);
@@ -144,7 +159,16 @@ static void api_state(Machine *m, Buf *b) {
         if (i) buf_append(b, ",", 1);
         json_str(b, m->files[i]);
     }
-    buf_printf(b, "],\"syscalls\":%llu}", (unsigned long long)m->syslog_count);
+    buf_printf(b, "],\"syscalls\":%llu,\"view_cpu\":%d,\"cache\":%s,\"cpus\":[", (unsigned long long)m->syslog_count,
+               m->view_cpu, m->cache ? "true" : "false");
+    for (int i = 0; i < m->ncpu; i++) {
+        CPU *k = m->cpus[i];
+        buf_printf(b, "%s{\"state\":\"%s\",\"icount\":%llu,\"rip\":", i ? "," : "",
+                   k->wait_sipi ? "wait-sipi" : k->halted ? "halted" : "running", (unsigned long long)k->icount);
+        json_hex(b, k->rip);
+        buf_printf(b, "}");
+    }
+    buf_printf(b, "]}");
 }
 
 static void disasm_line(Machine *m, Buf *b, uint64_t addr, int *len_out) {
@@ -180,11 +204,11 @@ static void api_disasm(Machine *m, const char *q, Buf *b) {
     char v[128];
     uint64_t start;
     if (query_get(q, "addr", v, sizeof v)) {
-        if (!machine_parse_addr(m, v, &start)) start = m->cpu.rip;
+        if (!machine_parse_addr(m, v, &start)) start = machine_cpu(m)->rip;
     } else {
         /* Around RIP: start at the enclosing function when it is close, so
          * instruction boundaries are right; otherwise start at RIP. */
-        uint64_t rip = m->cpu.rip;
+        uint64_t rip = machine_cpu(m)->rip;
         const Symbol *s = machine_find_symbol(m, rip);
         start = (s && rip - s->addr < 4096) ? s->addr : rip;
         int before = 0;
@@ -215,7 +239,7 @@ static void api_mem(Machine *m, const char *q, Buf *b) {
     if (query_get(q, "addr", v, sizeof v)) machine_parse_addr(m, v, &addr);
     uint64_t len = query_u64(q, "len", 256);
     if (len > 4096) len = 4096;
-    uint64_t lin = m->bits == 16 && !query_u64(q, "linear", 0) ? m->cpu.sbase[DS] + (addr & 0xFFFF) : addr;
+    uint64_t lin = m->bits == 16 && !query_u64(q, "linear", 0) ? machine_cpu(m)->sbase[DS] + (addr & 0xFFFF) : addr;
     buf_printf(b, "{\"addr\":");
     json_hex(b, addr);
     buf_printf(b, ",\"linear\":");
@@ -223,7 +247,7 @@ static void api_mem(Machine *m, const char *q, Buf *b) {
     buf_printf(b, ",\"bytes\":[");
     for (uint64_t i = 0; i < len; i++) {
         uint8_t x;
-        int ok = mem_peek(m->mem, lin + i, &x, 1) == 1;
+        int ok = machine_peek(m, lin + i, &x, 1) == 1;
         buf_printf(b, "%s%d", i ? "," : "", ok ? x : -1);
     }
     buf_printf(b, "]}");
@@ -233,13 +257,13 @@ static void api_stack(Machine *m, const char *q, Buf *b) {
     int count = (int)query_u64(q, "count", 24);
     if (count > 256) count = 256;
     int ws = m->bits == 64 ? 8 : m->bits == 32 ? 4 : 2;
-    uint64_t sp = m->cpu.r[RSP] & (m->bits == 64 ? ~0ULL : m->bits == 32 ? 0xFFFFFFFFULL : 0xFFFF);
-    uint64_t lin = m->cpu.sbase[SS] + sp;
+    uint64_t sp = machine_cpu(m)->r[RSP] & (m->bits == 64 ? ~0ULL : m->bits == 32 ? 0xFFFFFFFFULL : 0xFFFF);
+    uint64_t lin = machine_cpu(m)->sbase[SS] + sp;
     buf_printf(b, "{\"width\":%d,\"entries\":[", ws);
     for (int i = 0; i < count; i++) {
         uint64_t v = 0;
         char sym[160] = "";
-        int ok = mem_peek(m->mem, lin + (uint64_t)i * ws, &v, ws) == (size_t)ws;
+        int ok = machine_peek(m, lin + (uint64_t)i * ws, &v, ws) == (size_t)ws;
         if (ok) machine_symname(m, v, sym, sizeof sym);
         buf_printf(b, "%s{\"addr\":", i ? "," : "");
         json_hex(b, sp + (uint64_t)i * ws);
@@ -248,7 +272,7 @@ static void api_stack(Machine *m, const char *q, Buf *b) {
         else buf_printf(b, "null");
         buf_printf(b, ",\"sym\":");
         json_str(b, sym);
-        uint64_t rbp = m->cpu.r[RBP] & (m->bits == 64 ? ~0ULL : 0xFFFFFFFFULL);
+        uint64_t rbp = machine_cpu(m)->r[RBP] & (m->bits == 64 ? ~0ULL : 0xFFFFFFFFULL);
         buf_printf(b, ",\"rbp\":%s}", sp + (uint64_t)i * ws == rbp ? "true" : "false");
     }
     buf_printf(b, "]}");
@@ -324,16 +348,91 @@ static void api_symbols(Machine *m, Buf *b) {
     buf_printf(b, "]}");
 }
 
+static void json_cache_stats(Buf *b, Cache *c) {
+    CacheStats *t = &c->st;
+    int count[4] = {0};
+    for (int i = 0; i < c->sets * c->ways; i++) count[c->lines[i].state]++;
+    buf_printf(b, "{\"name\":\"%s\",\"sets\":%d,\"ways\":%d,\"reads\":%llu,\"writes\":%llu,\"fetches\":%llu,"
+               "\"hits\":%llu,\"misses\":%llu,\"evictions\":%llu,\"writebacks\":%llu,\"snoops\":%llu,"
+               "\"snoop_hits\":%llu,\"invalidations\":%llu,\"interventions\":%llu,\"upgrades\":%llu,"
+               "\"lines\":{\"M\":%d,\"E\":%d,\"S\":%d,\"I\":%d},\"trans\":[",
+               c->name, c->sets, c->ways, (unsigned long long)t->reads, (unsigned long long)t->writes,
+               (unsigned long long)t->fetches, (unsigned long long)t->hits, (unsigned long long)t->misses,
+               (unsigned long long)t->evictions, (unsigned long long)t->writebacks, (unsigned long long)t->snoops,
+               (unsigned long long)t->snoop_hits, (unsigned long long)t->invalidations,
+               (unsigned long long)t->interventions, (unsigned long long)t->upgrades, count[MESI_M], count[MESI_E],
+               count[MESI_S], count[MESI_I]);
+    for (int i = 0; i < 4; i++)
+        buf_printf(b, "%s[%llu,%llu,%llu,%llu]", i ? "," : "", (unsigned long long)t->trans[i][0],
+                   (unsigned long long)t->trans[i][1], (unsigned long long)t->trans[i][2],
+                   (unsigned long long)t->trans[i][3]);
+    buf_printf(b, "]}");
+}
+
+/* Cache statistics, the states of one line (addr= physical) and recent coherence events. */
+static void api_cache(Machine *m, const char *q, Buf *b) {
+    CacheSys *s = m->cache;
+    if (!s) {
+        buf_printf(b, "{\"enabled\":false}");
+        return;
+    }
+    buf_printf(b, "{\"enabled\":true,\"caches\":[");
+    for (int i = 0; i < s->ncores; i++) {
+        if (i) buf_append(b, ",", 1);
+        json_cache_stats(b, &s->l1d[i]);
+        buf_append(b, ",", 1);
+        json_cache_stats(b, &s->l1i[i]);
+    }
+    buf_append(b, ",", 1);
+    json_cache_stats(b, &s->l2);
+    buf_printf(b, "],\"bus\":{\"BusRd\":%llu,\"BusRdX\":%llu,\"BusUpgr\":%llu,\"BusWB\":%llu,\"c2c\":%llu,"
+               "\"mem_reads\":%llu,\"mem_writes\":%llu,\"uncached\":%llu}",
+               (unsigned long long)s->bus.bus_rd, (unsigned long long)s->bus.bus_rdx,
+               (unsigned long long)s->bus.bus_upgr, (unsigned long long)s->bus.bus_wb, (unsigned long long)s->bus.c2c,
+               (unsigned long long)s->bus.mem_reads, (unsigned long long)s->bus.mem_writes,
+               (unsigned long long)s->bus.uncached);
+    char v[64];
+    if (query_get(q, "addr", v, sizeof v) && v[0]) {
+        uint64_t pa = strtoull(v, NULL, 16);
+        uint32_t st = cache_line_states(s, pa);
+        uint8_t data[CACHE_LINE];
+        machine_phys_peek(m, pa & ~(uint64_t)(CACHE_LINE - 1), data, CACHE_LINE);
+        buf_printf(b, ",\"line\":{\"addr\":");
+        json_hex(b, pa & ~(uint64_t)(CACHE_LINE - 1));
+        buf_printf(b, ",\"cacheable\":%s,\"l1_set\":%llu,\"l2_set\":%llu,\"states\":[",
+                   cache_cacheable(s, pa) ? "true" : "false", (unsigned long long)((pa >> 6) & 63),
+                   (unsigned long long)((pa >> 6) & 4095));
+        for (int u = 0; u < s->ncores * 2; u++)
+            buf_printf(b, "%s[\"%s\",\"%c\"]", u ? "," : "", cache_unit_name(s, u),
+                       cache_state_char[(st >> (2 * u)) & 3]);
+        int l2 = (st >> 16) & 3;
+        buf_printf(b, ",[\"L2\",\"%s\"]],\"data\":\"", l2 == MESI_M ? "dirty" : l2 ? "clean" : "I");
+        for (int i = 0; i < CACHE_LINE; i++) buf_printf(b, "%02x", data[i]);
+        buf_printf(b, "\"}");
+    }
+    int n = (int)query_u64(q, "log", 40);
+    if (n > CACHE_LOG_LEN) n = CACHE_LOG_LEN;
+    uint64_t first = s->nlog > (uint64_t)n ? s->nlog - (uint64_t)n : 0;
+    buf_printf(b, ",\"events\":%llu,\"log\":[", (unsigned long long)s->nlog);
+    for (uint64_t i = first; i < s->nlog; i++) {
+        char line[256];
+        cache_format_event(s, &s->log[i % CACHE_LOG_LEN], line, sizeof line);
+        if (i > first) buf_append(b, ",", 1);
+        json_str(b, line);
+    }
+    buf_printf(b, "]}");
+}
+
 static int set_register(Machine *m, const char *name, uint64_t v) {
     static const char *names[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
                                     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
     for (int i = 0; i < 16; i++)
         if (!strcmp(name, names[i])) {
-            m->cpu.r[i] = v;
+            machine_cpu(m)->r[i] = v;
             return 0;
         }
-    if (!strcmp(name, "rip")) m->cpu.rip = v;
-    else if (!strcmp(name, "rflags")) m->cpu.rflags = (v & 0x3F7FD7) | 2;
+    if (!strcmp(name, "rip")) machine_cpu(m)->rip = v;
+    else if (!strcmp(name, "rflags")) machine_cpu(m)->rflags = (v & 0x3F7FD7) | 2;
     else return -1;
     return 0;
 }
@@ -357,6 +456,8 @@ static void handle_api(Machine *m, const char *method, const char *path, const c
     if (!strcmp(path, "/api/trace")) return api_trace(m, q, b);
     if (!strcmp(path, "/api/regions")) return api_regions(m, b);
     if (!strcmp(path, "/api/symbols")) return api_symbols(m, b);
+    if (!strcmp(path, "/api/screen")) return pc_screen(m, b);
+    if (!strcmp(path, "/api/cache")) return api_cache(m, q, b);
     if (!post) return api_error(b, "unknown endpoint or method");
 
     if (!strcmp(path, "/api/step")) {
@@ -386,14 +487,24 @@ static void handle_api(Machine *m, const char *method, const char *path, const c
         machine_init(&fresh);
         fresh.echo_output = 0;
         fresh.use_host_stdin = 0;
+        fresh.pc_mode = m->pc_mode; /* keep the machine type (PC disks, kernel, RAM) */
+        fresh.pc_ram_mb = m->pc_ram_mb;
+        fresh.pc_hda = m->pc_hda;
+        fresh.pc_fda = m->pc_fda;
+        fresh.pc_kernel = m->pc_kernel;
+        fresh.pc_initrd = m->pc_initrd;
+        fresh.pc_append = m->pc_append;
+        fresh.pc_boot = m->pc_boot;
+        fresh.pc_smp = m->pc_smp;
+        fresh.pc_cache = m->pc_cache;
+        fresh.yield_on_idle = 1;
         if (machine_load(&fresh, nf, fv, na, av, atoi(bits), err, sizeof err)) {
             machine_destroy(&fresh);
             return api_error(b, err);
         }
         machine_destroy(m);
         *m = fresh;
-        m->cpu.user = m;
-        m->cpu.mem = m->mem;
+        machine_rebind(m);
     } else if (!strcmp(path, "/api/break")) {
         uint64_t addr;
         if (!query_get(q, "addr", v, sizeof v) || !machine_parse_addr(m, v, &addr))
@@ -403,6 +514,11 @@ static void handle_api(Machine *m, const char *method, const char *path, const c
         int has = machine_has_bp(m, addr);
         if (!strcmp(action, "del") || (!strcmp(action, "toggle") && has)) machine_del_bp(m, addr);
         else if (machine_add_bp(m, addr)) return api_error(b, "too many breakpoints");
+    } else if (!strcmp(path, "/api/cpu")) {
+        int n = (int)query_u64(q, "n", 0);
+        if (n < 0 || n >= m->ncpu) return api_error(b, "no such CPU");
+        m->view_cpu = n;
+        m->bits = m->cpus[n]->bits;
     } else if (!strcmp(path, "/api/input")) {
         buf_append(&m->in, body, bodylen);
     } else if (!strcmp(path, "/api/setreg")) {
@@ -422,8 +538,12 @@ static void handle_api(Machine *m, const char *method, const char *path, const c
             char h[3] = {p[0], p[1], 0};
             data[n++] = (uint8_t)strtol(h, NULL, 16);
         }
-        uint64_t lin = m->bits == 16 ? m->cpu.sbase[DS] + (addr & 0xFFFF) : addr;
-        if (mem_poke(m->mem, lin, data, n) != n) return api_error(b, "address not mapped");
+        uint64_t lin = m->bits == 16 ? machine_cpu(m)->sbase[DS] + (addr & 0xFFFF) : addr;
+        for (size_t i = 0; i < n; i++) {
+            uint64_t pa = lin + i;
+            if (machine_cpu(m)->sys && cpu_virt_to_phys(machine_cpu(m), lin + i, &pa)) return api_error(b, "address not mapped");
+            if (machine_phys_poke(m, pa, data + i, 1) != 1) return api_error(b, "address not mapped");
+        }
     } else {
         return api_error(b, "unknown endpoint");
     }

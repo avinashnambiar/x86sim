@@ -1,0 +1,9 @@
+bsp apic id 00000000 
+ap started, apic id 00000001 
+counters (lock inc, spinlock) 00000fa0 00000fa0 
+unprotected counter lost updates: yes
+ipis received (apic id + 1) 00000002 00000001 
+mesi states of the test line (cpu0 L1D/L1I in bits 0-3, cpu1 in 4-7, L2 in 16-17):
+00020020 00020011 00020003 00030011 
+00030030 a9a9a9a9 00030011 00000000 a9a9a9a9 00020002 00000000 
+bye

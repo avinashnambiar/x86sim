@@ -22,6 +22,7 @@ enum {
     F_PFX = 1 << 4,   /* mandatory prefix selects from a prefix table (grp field) */
     F_MODRM = 1 << 5, /* has ModRM even without ModRM operands */
     F_LOCK = 1 << 6,  /* LOCK prefix allowed (memory destination) */
+    F_REG = 1 << 7,   /* ModRM always names registers (mod is ignored) */
 };
 
 typedef struct {
@@ -36,7 +37,7 @@ typedef struct {
 #define OP2(i, a, b, f) {I_##i, {O_##a, O_##b, 0}, (f), 0}
 #define OP3(i, a, b, c, f) {I_##i, {O_##a, O_##b, O_##c}, (f), 0}
 #define GR(g, a, b, f) {0, {O_##a, O_##b, 0}, (f) | F_GRP, g}
-#define PF(p) {0, {0, 0, 0}, F_PFX, p}
+#define PF {0, {0, 0, 0}, F_PFX, 0}
 
 #define ALU6(base, id) \
     [base + 0] = OP2(id, Eb, Gb, F_LOCK), [base + 1] = OP2(id, Ev, Gv, F_LOCK), \
@@ -112,43 +113,43 @@ static const OpDef map1[256] = {
     [0xFE] = GR(G4, NONE, NONE, 0), [0xFF] = GR(G5, NONE, NONE, 0),
 };
 
-enum {
-    P_10 = 1, P_11, P_28, P_29, P_54, P_55, P_56, P_57, P_6C, P_6E, P_6F, P_70, P_74, P_75, P_76,
-    P_7E, P_7F, P_B8, P_BC, P_BD, P_D4, P_D6, P_D7, P_DB, P_DF, P_EB, P_EF,
-    P_F8, P_F9, P_FA, P_FB, P_FC, P_FD, P_FE,
-    P_12, P_13, P_14, P_15, P_16, P_17, P_2B, P_50, P_60, P_61, P_62, P_63, P_64, P_65, P_66, P_67,
-    P_68, P_69, P_6A, P_6B, P_6D, P_71, P_72, P_73, P_C4, P_C5, P_C6, P_D1, P_D2, P_D3, P_D5,
-    P_D8, P_D9, P_DA, P_DC, P_DD, P_DE, P_E0, P_E1, P_E2, P_E3, P_E4, P_E5, P_E7, P_E8, P_E9,
-    P_EA, P_EC, P_ED, P_EE, P_F1, P_F2, P_F3, P_F4, P_F5, P_F6, P_F7, NPFX
-};
 
 static const OpDef map0f[256] = {
     [0x00] = GR(G6, NONE, NONE, 0), [0x01] = GR(G7, NONE, NONE, 0),
-    [0x05] = OP0(SYSCALL, 0), [0x0B] = OP0(UD2, 0), [0x0D] = OP1(PREFETCH, Ev, 0),
-    [0x10] = PF(P_10), [0x11] = PF(P_11),
+    [0x02] = OP2(LAR, Gv, Ew, 0), [0x03] = OP2(LSL, Gv, Ew, 0),
+    [0x05] = OP0(SYSCALL, 0), [0x06] = OP0(CLTS, 0), [0x07] = OP0(SYSRET, 0),
+    [0x08] = OP0(INVD, 0), [0x09] = OP0(WBINVD, 0),
+    [0x0B] = OP0(UD2, 0), [0x0D] = OP1(PREFETCH, Ev, 0),
+    [0x20] = OP2(MOVCR, Ry, Cd, F_REG), [0x21] = OP2(MOVDR, Ry, Dd, F_REG),
+    [0x22] = OP2(MOVCR, Cd, Ry, F_REG), [0x23] = OP2(MOVDR, Dd, Ry, F_REG),
+    [0x30] = OP0(WRMSR, 0), [0x32] = OP0(RDMSR, 0), [0x33] = OP0(RDPMC, 0), [0x35] = OP0(SYSEXIT, 0),
+    [0xAA] = OP0(RSM, 0), [0xB9] = OP2(UD1, Gv, Ev, 0), [0xFF] = OP2(UD0, Gv, Ev, 0),
+    [0x10] = PF, [0x11] = PF,
     [0x18] = OP1(PREFETCH, Ev, 0), [0x19 ... 0x1F] = OP1(NOP, Ev, 0),
-    [0x12] = PF(P_12), [0x13] = PF(P_13), [0x14] = PF(P_14), [0x15] = PF(P_15),
-    [0x16] = PF(P_16), [0x17] = PF(P_17),
-    [0x28] = PF(P_28), [0x29] = PF(P_29), [0x2B] = PF(P_2B),
-    [0x50] = PF(P_50),
-    [0x60] = PF(P_60), [0x61] = PF(P_61), [0x62] = PF(P_62), [0x63] = PF(P_63),
-    [0x64] = PF(P_64), [0x65] = PF(P_65), [0x66] = PF(P_66), [0x67] = PF(P_67),
-    [0x68] = PF(P_68), [0x69] = PF(P_69), [0x6A] = PF(P_6A), [0x6B] = PF(P_6B), [0x6D] = PF(P_6D),
-    [0x71] = PF(P_71), [0x72] = PF(P_72), [0x73] = PF(P_73),
-    [0xC3] = OP2(MOVNTI, Ey, Gy, 0), [0xC4] = PF(P_C4), [0xC5] = PF(P_C5), [0xC6] = PF(P_C6),
-    [0xD1] = PF(P_D1), [0xD2] = PF(P_D2), [0xD3] = PF(P_D3), [0xD5] = PF(P_D5),
-    [0xD8] = PF(P_D8), [0xD9] = PF(P_D9), [0xDA] = PF(P_DA), [0xDC] = PF(P_DC), [0xDD] = PF(P_DD), [0xDE] = PF(P_DE),
-    [0xE0] = PF(P_E0), [0xE1] = PF(P_E1), [0xE2] = PF(P_E2), [0xE3] = PF(P_E3), [0xE4] = PF(P_E4), [0xE5] = PF(P_E5),
-    [0xE7] = PF(P_E7), [0xE8] = PF(P_E8), [0xE9] = PF(P_E9), [0xEA] = PF(P_EA), [0xEC] = PF(P_EC), [0xED] = PF(P_ED),
-    [0xEE] = PF(P_EE),
-    [0xF1] = PF(P_F1), [0xF2] = PF(P_F2), [0xF3] = PF(P_F3), [0xF4] = PF(P_F4), [0xF5] = PF(P_F5), [0xF6] = PF(P_F6),
-    [0xF7] = PF(P_F7),
+    [0x12] = PF, [0x13] = PF, [0x14] = PF, [0x15] = PF,
+    [0x16] = PF, [0x17] = PF,
+    [0x28] = PF, [0x29] = PF, [0x2A] = PF, [0x2B] = PF, [0x2C] = PF, [0x2D] = PF, [0x2E] = PF, [0x2F] = PF,
+    [0x51] = PF, [0x52] = PF, [0x53] = PF, [0x58 ... 0x5F] = PF,
+    [0x77] = OP0(EMMS, 0), [0x7C] = PF, [0x7D] = PF, [0xC2] = PF, [0xD0] = PF, [0xE6] = PF, [0xF0] = PF,
+    [0x50] = PF,
+    [0x60] = PF, [0x61] = PF, [0x62] = PF, [0x63] = PF,
+    [0x64] = PF, [0x65] = PF, [0x66] = PF, [0x67] = PF,
+    [0x68] = PF, [0x69] = PF, [0x6A] = PF, [0x6B] = PF, [0x6D] = PF,
+    [0x71] = PF, [0x72] = PF, [0x73] = PF,
+    [0xC3] = OP2(MOVNTI, Ey, Gy, 0), [0xC4] = PF, [0xC5] = PF, [0xC6] = PF,
+    [0xD1] = PF, [0xD2] = PF, [0xD3] = PF, [0xD5] = PF,
+    [0xD8] = PF, [0xD9] = PF, [0xDA] = PF, [0xDC] = PF, [0xDD] = PF, [0xDE] = PF,
+    [0xE0] = PF, [0xE1] = PF, [0xE2] = PF, [0xE3] = PF, [0xE4] = PF, [0xE5] = PF,
+    [0xE7] = PF, [0xE8] = PF, [0xE9] = PF, [0xEA] = PF, [0xEC] = PF, [0xED] = PF,
+    [0xEE] = PF,
+    [0xF1] = PF, [0xF2] = PF, [0xF3] = PF, [0xF4] = PF, [0xF5] = PF, [0xF6] = PF,
+    [0xF7] = PF,
     [0x31] = OP0(RDTSC, 0), [0x34] = OP0(SYSENTER, 0),
     [0x40 ... 0x4F] = OP2(CMOVCC, Gv, Ev, 0),
-    [0x54] = PF(P_54), [0x55] = PF(P_55), [0x56] = PF(P_56), [0x57] = PF(P_57),
-    [0x6C] = PF(P_6C), [0x6E] = PF(P_6E), [0x6F] = PF(P_6F),
-    [0x70] = PF(P_70), [0x74] = PF(P_74), [0x75] = PF(P_75), [0x76] = PF(P_76),
-    [0x7E] = PF(P_7E), [0x7F] = PF(P_7F),
+    [0x54] = PF, [0x55] = PF, [0x56] = PF, [0x57] = PF,
+    [0x6C] = PF, [0x6E] = PF, [0x6F] = PF,
+    [0x70] = PF, [0x74] = PF, [0x75] = PF, [0x76] = PF,
+    [0x7E] = PF, [0x7F] = PF,
     [0x80 ... 0x8F] = OP1(JCC, Jz, F_F64),
     [0x90 ... 0x9F] = OP1(SETCC, Eb, 0),
     [0xA0] = OP1(PUSH, FS, F_D64), [0xA1] = OP1(POP, FS, F_D64), [0xA2] = OP0(CPUID, 0),
@@ -160,77 +161,141 @@ static const OpDef map0f[256] = {
     [0xB2] = OP2(LSS, Gv, Mp, 0), [0xB3] = OP2(BTR, Ev, Gv, F_LOCK),
     [0xB4] = OP2(LFS, Gv, Mp, 0), [0xB5] = OP2(LGS, Gv, Mp, 0),
     [0xB6] = OP2(MOVZX, Gv, Eb, 0), [0xB7] = OP2(MOVZX, Gv, Ew, 0),
-    [0xB8] = PF(P_B8), [0xBA] = GR(G8, NONE, NONE, 0), [0xBB] = OP2(BTC, Ev, Gv, F_LOCK),
-    [0xBC] = PF(P_BC), [0xBD] = PF(P_BD),
+    [0xB8] = PF, [0xBA] = GR(G8, NONE, NONE, 0), [0xBB] = OP2(BTC, Ev, Gv, F_LOCK),
+    [0xBC] = PF, [0xBD] = PF,
     [0xBE] = OP2(MOVSX, Gv, Eb, 0), [0xBF] = OP2(MOVSX, Gv, Ew, 0),
     [0xC0] = OP2(XADD, Eb, Gb, F_LOCK), [0xC1] = OP2(XADD, Ev, Gv, F_LOCK),
     [0xC7] = GR(G9, NONE, NONE, 0),
     [0xC8 ... 0xCF] = OP1(BSWAP, Zv, 0),
-    [0xD4] = PF(P_D4), [0xD6] = PF(P_D6), [0xD7] = PF(P_D7), [0xDB] = PF(P_DB), [0xDF] = PF(P_DF),
-    [0xEB] = PF(P_EB), [0xEF] = PF(P_EF),
-    [0xF8] = PF(P_F8), [0xF9] = PF(P_F9), [0xFA] = PF(P_FA), [0xFB] = PF(P_FB),
-    [0xFC] = PF(P_FC), [0xFD] = PF(P_FD), [0xFE] = PF(P_FE),
+    [0xD4] = PF, [0xD6] = PF, [0xD7] = PF, [0xDB] = PF, [0xDF] = PF,
+    [0xEB] = PF, [0xEF] = PF,
+    [0xF8] = PF, [0xF9] = PF, [0xFA] = PF, [0xFB] = PF,
+    [0xFC] = PF, [0xFD] = PF, [0xFE] = PF,
 };
 
-/* Three-byte maps: populated as SSSE3/SSE4/AES/SHA support is added. */
-static const OpDef map0f38[256];
-static const OpDef map0f3a[256];
 
 /* Mandatory-prefix variants: [none, 66, F3, F2] */
 #define SSE2(id, a, b) {{0}, OP2(id, a, b, 0), {0}, {0}}
-static const OpDef pfxtab[NPFX][4] = {
-    [P_10] = {OP2(MOVUPS, Vx, Wx, 0), OP2(MOVUPD, Vx, Wx, 0), OP2(MOVSS, Vx, Wd, 0), OP2(MOVSD_X, Vx, Wq, 0)},
-    [P_11] = {OP2(MOVUPS, Wx, Vx, 0), OP2(MOVUPD, Wx, Vx, 0), OP2(MOVSS, Wd, Vx, 0), OP2(MOVSD_X, Wq, Vx, 0)},
-    [P_28] = {OP2(MOVAPS, Vx, Wx, 0), OP2(MOVAPD, Vx, Wx, 0)},
-    [P_29] = {OP2(MOVAPS, Wx, Vx, 0), OP2(MOVAPD, Wx, Vx, 0)},
-    [P_54] = {OP2(ANDPS, Vx, Wx, 0), OP2(ANDPD, Vx, Wx, 0)},
-    [P_55] = {OP2(ANDNPS, Vx, Wx, 0), OP2(ANDNPD, Vx, Wx, 0)},
-    [P_56] = {OP2(ORPS, Vx, Wx, 0), OP2(ORPD, Vx, Wx, 0)},
-    [P_57] = {OP2(XORPS, Vx, Wx, 0), OP2(XORPD, Vx, Wx, 0)},
-    [P_6C] = SSE2(PUNPCKLQDQ, Vx, Wx),
-    [P_6E] = SSE2(MOVD, Vx, Ey),
-    [P_6F] = {{0}, OP2(MOVDQA, Vx, Wx, 0), OP2(MOVDQU, Vx, Wx, 0), {0}},
-    [P_70] = {{0}, OP3(PSHUFD, Vx, Wx, Ib, 0), OP3(PSHUFHW, Vx, Wx, Ib, 0), OP3(PSHUFLW, Vx, Wx, Ib, 0)},
-    [P_12] = {OP2(MOVLPS, Vx, Wq, 0), OP2(MOVLPD, Vx, Wq, 0)},
-    [P_13] = {OP2(MOVLPS, Wq, Vx, 0), OP2(MOVLPD, Wq, Vx, 0)},
-    [P_14] = {OP2(UNPCKLPS, Vx, Wx, 0), OP2(UNPCKLPD, Vx, Wx, 0)},
-    [P_15] = {OP2(UNPCKHPS, Vx, Wx, 0), OP2(UNPCKHPD, Vx, Wx, 0)},
-    [P_16] = {OP2(MOVHPS, Vx, Wq, 0), OP2(MOVHPD, Vx, Wq, 0)},
-    [P_17] = {OP2(MOVHPS, Wq, Vx, 0), OP2(MOVHPD, Wq, Vx, 0)},
-    [P_2B] = {OP2(MOVNTPS, Wx, Vx, 0), OP2(MOVNTPD, Wx, Vx, 0)},
-    [P_50] = {OP2(MOVMSKPS, Gd, Ux, 0), OP2(MOVMSKPD, Gd, Ux, 0)},
-    [P_60] = SSE2(PUNPCKLBW, Vx, Wx), [P_61] = SSE2(PUNPCKLWD, Vx, Wx), [P_62] = SSE2(PUNPCKLDQ, Vx, Wx),
-    [P_63] = SSE2(PACKSSWB, Vx, Wx), [P_64] = SSE2(PCMPGTB, Vx, Wx), [P_65] = SSE2(PCMPGTW, Vx, Wx),
-    [P_66] = SSE2(PCMPGTD, Vx, Wx), [P_67] = SSE2(PACKUSWB, Vx, Wx), [P_68] = SSE2(PUNPCKHBW, Vx, Wx),
-    [P_69] = SSE2(PUNPCKHWD, Vx, Wx), [P_6A] = SSE2(PUNPCKHDQ, Vx, Wx), [P_6B] = SSE2(PACKSSDW, Vx, Wx),
-    [P_6D] = SSE2(PUNPCKHQDQ, Vx, Wx),
-    [P_71] = {{0}, GR(G12, Ux, Ib, 0)}, [P_72] = {{0}, GR(G13, Ux, Ib, 0)}, [P_73] = {{0}, GR(G14, Ux, Ib, 0)},
-    [P_C4] = {{0}, OP3(PINSRW, Vx, Ew, Ib, 0)}, [P_C5] = {{0}, OP3(PEXTRW, Gd, Ux, Ib, 0)},
-    [P_C6] = {OP3(SHUFPS, Vx, Wx, Ib, 0), OP3(SHUFPD, Vx, Wx, Ib, 0)},
-    [P_D1] = SSE2(PSRLW, Vx, Wx), [P_D2] = SSE2(PSRLD, Vx, Wx), [P_D3] = SSE2(PSRLQ, Vx, Wx),
-    [P_D5] = SSE2(PMULLW, Vx, Wx), [P_D8] = SSE2(PSUBUSB, Vx, Wx), [P_D9] = SSE2(PSUBUSW, Vx, Wx),
-    [P_DA] = SSE2(PMINUB, Vx, Wx), [P_DC] = SSE2(PADDUSB, Vx, Wx), [P_DD] = SSE2(PADDUSW, Vx, Wx),
-    [P_DE] = SSE2(PMAXUB, Vx, Wx), [P_E0] = SSE2(PAVGB, Vx, Wx), [P_E1] = SSE2(PSRAW, Vx, Wx),
-    [P_E2] = SSE2(PSRAD, Vx, Wx), [P_E3] = SSE2(PAVGW, Vx, Wx), [P_E4] = SSE2(PMULHUW, Vx, Wx),
-    [P_E5] = SSE2(PMULHW, Vx, Wx), [P_E7] = SSE2(MOVNTDQ, Wx, Vx), [P_E8] = SSE2(PSUBSB, Vx, Wx),
-    [P_E9] = SSE2(PSUBSW, Vx, Wx), [P_EA] = SSE2(PMINSW, Vx, Wx), [P_EC] = SSE2(PADDSB, Vx, Wx),
-    [P_ED] = SSE2(PADDSW, Vx, Wx), [P_EE] = SSE2(PMAXSW, Vx, Wx), [P_F1] = SSE2(PSLLW, Vx, Wx),
-    [P_F2] = SSE2(PSLLD, Vx, Wx), [P_F3] = SSE2(PSLLQ, Vx, Wx), [P_F4] = SSE2(PMULUDQ, Vx, Wx),
-    [P_F5] = SSE2(PMADDWD, Vx, Wx), [P_F6] = SSE2(PSADBW, Vx, Wx), [P_F7] = SSE2(MASKMOVDQU, Vx, Ux),
-    [P_74] = SSE2(PCMPEQB, Vx, Wx), [P_75] = SSE2(PCMPEQW, Vx, Wx), [P_76] = SSE2(PCMPEQD, Vx, Wx),
-    [P_7E] = {{0}, OP2(MOVD, Ey, Vx, 0), OP2(MOVQ, Vx, Wq, 0), {0}},
-    [P_7F] = {{0}, OP2(MOVDQA, Wx, Vx, 0), OP2(MOVDQU, Wx, Vx, 0), {0}},
-    [P_B8] = {{0}, {0}, OP2(POPCNT, Gv, Ev, 0), {0}},
-    [P_BC] = {OP2(BSF, Gv, Ev, 0), OP2(BSF, Gv, Ev, 0), OP2(TZCNT, Gv, Ev, 0), OP2(BSF, Gv, Ev, 0)},
-    [P_BD] = {OP2(BSR, Gv, Ev, 0), OP2(BSR, Gv, Ev, 0), OP2(LZCNT, Gv, Ev, 0), OP2(BSR, Gv, Ev, 0)},
-    [P_D4] = SSE2(PADDQ, Vx, Wx),
-    [P_D6] = SSE2(MOVQ, Wq, Vx),
-    [P_D7] = SSE2(PMOVMSKB, Gd, Ux),
-    [P_DB] = SSE2(PAND, Vx, Wx), [P_DF] = SSE2(PANDN, Vx, Wx),
-    [P_EB] = SSE2(POR, Vx, Wx), [P_EF] = SSE2(PXOR, Vx, Wx),
-    [P_F8] = SSE2(PSUBB, Vx, Wx), [P_F9] = SSE2(PSUBW, Vx, Wx),
-    [P_FA] = SSE2(PSUBD, Vx, Wx), [P_FB] = SSE2(PSUBQ, Vx, Wx),
-    [P_FC] = SSE2(PADDB, Vx, Wx), [P_FD] = SSE2(PADDW, Vx, Wx), [P_FE] = SSE2(PADDD, Vx, Wx),
+#define MX(id) {OP2(id, Pq, Qq, 0), OP2(id, Vx, Wx, 0), {0}, {0}}
+#define FP4(n) {OP2(n##PS, Vx, Wx, 0), OP2(n##PD, Vx, Wx, 0), OP2(n##SS, Vx, Wd, 0), OP2(n##SD, Vx, Wq, 0)}
+static const OpDef pfx0f[256][4] = {
+    [0x10] = {OP2(MOVUPS, Vx, Wx, 0), OP2(MOVUPD, Vx, Wx, 0), OP2(MOVSS, Vx, Wd, 0), OP2(MOVSD_X, Vx, Wq, 0)},
+    [0x11] = {OP2(MOVUPS, Wx, Vx, 0), OP2(MOVUPD, Wx, Vx, 0), OP2(MOVSS, Wd, Vx, 0), OP2(MOVSD_X, Wq, Vx, 0)},
+    [0x12] = {OP2(MOVLPS, Vx, Wq, 0), OP2(MOVLPD, Vx, Wq, 0), OP2(MOVSLDUP, Vx, Wx, 0), OP2(MOVDDUP, Vx, Wq, 0)},
+    [0x13] = {OP2(MOVLPS, Wq, Vx, 0), OP2(MOVLPD, Wq, Vx, 0)},
+    [0x14] = {OP2(UNPCKLPS, Vx, Wx, 0), OP2(UNPCKLPD, Vx, Wx, 0)},
+    [0x15] = {OP2(UNPCKHPS, Vx, Wx, 0), OP2(UNPCKHPD, Vx, Wx, 0)},
+    [0x16] = {OP2(MOVHPS, Vx, Wq, 0), OP2(MOVHPD, Vx, Wq, 0), OP2(MOVSHDUP, Vx, Wx, 0)},
+    [0x17] = {OP2(MOVHPS, Wq, Vx, 0), OP2(MOVHPD, Wq, Vx, 0)},
+    [0x28] = {OP2(MOVAPS, Vx, Wx, 0), OP2(MOVAPD, Vx, Wx, 0)},
+    [0x29] = {OP2(MOVAPS, Wx, Vx, 0), OP2(MOVAPD, Wx, Vx, 0)},
+    [0x2A] = {OP2(CVTPI2PS, Vx, Qq, 0), OP2(CVTPI2PD, Vx, Qq, 0), OP2(CVTSI2SS, Vx, Ey, 0), OP2(CVTSI2SD, Vx, Ey, 0)},
+    [0x2B] = {OP2(MOVNTPS, Wx, Vx, 0), OP2(MOVNTPD, Wx, Vx, 0)},
+    [0x2C] = {OP2(CVTTPS2PI, Pq, Wq, 0), OP2(CVTTPD2PI, Pq, Wx, 0), OP2(CVTTSS2SI, Gy, Wd, 0), OP2(CVTTSD2SI, Gy, Wq, 0)},
+    [0x2D] = {OP2(CVTPS2PI, Pq, Wq, 0), OP2(CVTPD2PI, Pq, Wx, 0), OP2(CVTSS2SI, Gy, Wd, 0), OP2(CVTSD2SI, Gy, Wq, 0)},
+    [0x2E] = {OP2(UCOMISS, Vx, Wd, 0), OP2(UCOMISD, Vx, Wq, 0)},
+    [0x2F] = {OP2(COMISS, Vx, Wd, 0), OP2(COMISD, Vx, Wq, 0)},
+    [0x50] = {OP2(MOVMSKPS, Gd, Ux, 0), OP2(MOVMSKPD, Gd, Ux, 0)},
+    [0x51] = FP4(SQRT),
+    [0x52] = {OP2(RSQRTPS, Vx, Wx, 0), {0}, OP2(RSQRTSS, Vx, Wd, 0)},
+    [0x53] = {OP2(RCPPS, Vx, Wx, 0), {0}, OP2(RCPSS, Vx, Wd, 0)},
+    [0x54] = {OP2(ANDPS, Vx, Wx, 0), OP2(ANDPD, Vx, Wx, 0)},
+    [0x55] = {OP2(ANDNPS, Vx, Wx, 0), OP2(ANDNPD, Vx, Wx, 0)},
+    [0x56] = {OP2(ORPS, Vx, Wx, 0), OP2(ORPD, Vx, Wx, 0)},
+    [0x57] = {OP2(XORPS, Vx, Wx, 0), OP2(XORPD, Vx, Wx, 0)},
+    [0x58] = FP4(ADD), [0x59] = FP4(MUL),
+    [0x5A] = {OP2(CVTPS2PD, Vx, Wq, 0), OP2(CVTPD2PS, Vx, Wx, 0), OP2(CVTSS2SD, Vx, Wd, 0), OP2(CVTSD2SS, Vx, Wq, 0)},
+    [0x5B] = {OP2(CVTDQ2PS, Vx, Wx, 0), OP2(CVTPS2DQ, Vx, Wx, 0), OP2(CVTTPS2DQ, Vx, Wx, 0)},
+    [0x5C] = FP4(SUB), [0x5D] = FP4(MIN), [0x5E] = FP4(DIV), [0x5F] = FP4(MAX),
+    [0x60] = MX(PUNPCKLBW), [0x61] = MX(PUNPCKLWD), [0x62] = MX(PUNPCKLDQ), [0x63] = MX(PACKSSWB),
+    [0x64] = MX(PCMPGTB), [0x65] = MX(PCMPGTW), [0x66] = MX(PCMPGTD), [0x67] = MX(PACKUSWB),
+    [0x68] = MX(PUNPCKHBW), [0x69] = MX(PUNPCKHWD), [0x6A] = MX(PUNPCKHDQ), [0x6B] = MX(PACKSSDW),
+    [0x6C] = SSE2(PUNPCKLQDQ, Vx, Wx), [0x6D] = SSE2(PUNPCKHQDQ, Vx, Wx),
+    [0x6E] = {OP2(MOVD, Pq, Ey, 0), OP2(MOVD, Vx, Ey, 0)},
+    [0x6F] = {OP2(MOVQ, Pq, Qq, 0), OP2(MOVDQA, Vx, Wx, 0), OP2(MOVDQU, Vx, Wx, 0)},
+    [0x70] = {OP3(PSHUFW, Pq, Qq, Ib, 0), OP3(PSHUFD, Vx, Wx, Ib, 0), OP3(PSHUFHW, Vx, Wx, Ib, 0), OP3(PSHUFLW, Vx, Wx, Ib, 0)},
+    [0x71] = {GR(G12, Nq, Ib, 0), GR(G12, Ux, Ib, 0)},
+    [0x72] = {GR(G13, Nq, Ib, 0), GR(G13, Ux, Ib, 0)},
+    [0x73] = {GR(G14, Nq, Ib, 0), GR(G14, Ux, Ib, 0)},
+    [0x74] = MX(PCMPEQB), [0x75] = MX(PCMPEQW), [0x76] = MX(PCMPEQD),
+    [0x7C] = {{0}, OP2(HADDPD, Vx, Wx, 0), {0}, OP2(HADDPS, Vx, Wx, 0)},
+    [0x7D] = {{0}, OP2(HSUBPD, Vx, Wx, 0), {0}, OP2(HSUBPS, Vx, Wx, 0)},
+    [0x7E] = {OP2(MOVD, Ey, Pq, 0), OP2(MOVD, Ey, Vx, 0), OP2(MOVQ, Vx, Wq, 0)},
+    [0x7F] = {OP2(MOVQ, Qq, Pq, 0), OP2(MOVDQA, Wx, Vx, 0), OP2(MOVDQU, Wx, Vx, 0)},
+    [0xB8] = {{0}, {0}, OP2(POPCNT, Gv, Ev, 0), {0}},
+    [0xBC] = {OP2(BSF, Gv, Ev, 0), OP2(BSF, Gv, Ev, 0), OP2(TZCNT, Gv, Ev, 0), OP2(BSF, Gv, Ev, 0)},
+    [0xBD] = {OP2(BSR, Gv, Ev, 0), OP2(BSR, Gv, Ev, 0), OP2(LZCNT, Gv, Ev, 0), OP2(BSR, Gv, Ev, 0)},
+    [0xC2] = {OP3(CMPPS, Vx, Wx, Ib, 0), OP3(CMPPD, Vx, Wx, Ib, 0), OP3(CMPSS, Vx, Wd, Ib, 0), OP3(CMPSD_X, Vx, Wq, Ib, 0)},
+    [0xC4] = {OP3(PINSRW, Pq, Ew, Ib, 0), OP3(PINSRW, Vx, Ew, Ib, 0)},
+    [0xC5] = {OP3(PEXTRW, Gd, Nq, Ib, 0), OP3(PEXTRW, Gd, Ux, Ib, 0)},
+    [0xC6] = {OP3(SHUFPS, Vx, Wx, Ib, 0), OP3(SHUFPD, Vx, Wx, Ib, 0)},
+    [0xD0] = {{0}, OP2(ADDSUBPD, Vx, Wx, 0), {0}, OP2(ADDSUBPS, Vx, Wx, 0)},
+    [0xD1] = MX(PSRLW), [0xD2] = MX(PSRLD), [0xD3] = MX(PSRLQ), [0xD4] = MX(PADDQ), [0xD5] = MX(PMULLW),
+    [0xD6] = {{0}, OP2(MOVQ, Wq, Vx, 0), OP2(MOVQ2DQ, Vx, Nq, 0), OP2(MOVDQ2Q, Pq, Ux, 0)},
+    [0xD7] = {OP2(PMOVMSKB, Gd, Nq, 0), OP2(PMOVMSKB, Gd, Ux, 0)},
+    [0xD8] = MX(PSUBUSB), [0xD9] = MX(PSUBUSW), [0xDA] = MX(PMINUB), [0xDB] = MX(PAND),
+    [0xDC] = MX(PADDUSB), [0xDD] = MX(PADDUSW), [0xDE] = MX(PMAXUB), [0xDF] = MX(PANDN),
+    [0xE0] = MX(PAVGB), [0xE1] = MX(PSRAW), [0xE2] = MX(PSRAD), [0xE3] = MX(PAVGW),
+    [0xE4] = MX(PMULHUW), [0xE5] = MX(PMULHW),
+    [0xE6] = {{0}, OP2(CVTTPD2DQ, Vx, Wx, 0), OP2(CVTDQ2PD, Vx, Wq, 0), OP2(CVTPD2DQ, Vx, Wx, 0)},
+    [0xE7] = {OP2(MOVNTQ, Qq, Pq, 0), OP2(MOVNTDQ, Wx, Vx, 0)},
+    [0xE8] = MX(PSUBSB), [0xE9] = MX(PSUBSW), [0xEA] = MX(PMINSW), [0xEB] = MX(POR),
+    [0xEC] = MX(PADDSB), [0xED] = MX(PADDSW), [0xEE] = MX(PMAXSW), [0xEF] = MX(PXOR),
+    [0xF0] = {{0}, {0}, {0}, OP2(LDDQU, Vx, M, 0)},
+    [0xF1] = MX(PSLLW), [0xF2] = MX(PSLLD), [0xF3] = MX(PSLLQ), [0xF4] = MX(PMULUDQ),
+    [0xF5] = MX(PMADDWD), [0xF6] = MX(PSADBW),
+    [0xF7] = {OP2(MASKMOVQ, Pq, Nq, 0), OP2(MASKMOVDQU, Vx, Ux, 0)},
+    [0xF8] = MX(PSUBB), [0xF9] = MX(PSUBW), [0xFA] = MX(PSUBD), [0xFB] = MX(PSUBQ),
+    [0xFC] = MX(PADDB), [0xFD] = MX(PADDW), [0xFE] = MX(PADDD),
+};
+
+/* 0F 38 xx and 0F 3A xx (all entries are mandatory-prefix selected) */
+#define S66(id, a, b) {{0}, OP2(id, a, b, 0)}
+#define S66I(id, a, b) {{0}, OP3(id, a, b, Ib, 0)}
+static const OpDef pfx0f38[256][4] = {
+    [0xF5] = {{0}, OP2(WRUSS, Ey, Gy, 0)},
+    [0xF6] = {OP2(WRSS, Ey, Gy, 0), OP2(ADCX, Gy, Ey, 0), OP2(ADOX, Gy, Ey, 0)},
+    [0x00] = MX(PSHUFB), [0x01] = MX(PHADDW), [0x02] = MX(PHADDD), [0x03] = MX(PHADDSW),
+    [0x04] = MX(PMADDUBSW), [0x05] = MX(PHSUBW), [0x06] = MX(PHSUBD), [0x07] = MX(PHSUBSW),
+    [0x08] = MX(PSIGNB), [0x09] = MX(PSIGNW), [0x0A] = MX(PSIGND), [0x0B] = MX(PMULHRSW),
+    [0x10] = S66(PBLENDVB, Vx, Wx), [0x14] = S66(BLENDVPS, Vx, Wx), [0x15] = S66(BLENDVPD, Vx, Wx),
+    [0x17] = S66(PTEST, Vx, Wx),
+    [0x1C] = MX(PABSB), [0x1D] = MX(PABSW), [0x1E] = MX(PABSD),
+    [0x20] = S66(PMOVSXBW, Vx, Wq), [0x21] = S66(PMOVSXBD, Vx, Wd), [0x22] = S66(PMOVSXBQ, Vx, Ww),
+    [0x23] = S66(PMOVSXWD, Vx, Wq), [0x24] = S66(PMOVSXWQ, Vx, Wd), [0x25] = S66(PMOVSXDQ, Vx, Wq),
+    [0x28] = S66(PMULDQ, Vx, Wx), [0x29] = S66(PCMPEQQ, Vx, Wx), [0x2A] = S66(MOVNTDQA, Vx, M),
+    [0x2B] = S66(PACKUSDW, Vx, Wx),
+    [0x30] = S66(PMOVZXBW, Vx, Wq), [0x31] = S66(PMOVZXBD, Vx, Wd), [0x32] = S66(PMOVZXBQ, Vx, Ww),
+    [0x33] = S66(PMOVZXWD, Vx, Wq), [0x34] = S66(PMOVZXWQ, Vx, Wd), [0x35] = S66(PMOVZXDQ, Vx, Wq),
+    [0x37] = S66(PCMPGTQ, Vx, Wx),
+    [0x38] = S66(PMINSB, Vx, Wx), [0x39] = S66(PMINSD, Vx, Wx), [0x3A] = S66(PMINUW, Vx, Wx),
+    [0x3B] = S66(PMINUD, Vx, Wx), [0x3C] = S66(PMAXSB, Vx, Wx), [0x3D] = S66(PMAXSD, Vx, Wx),
+    [0x3E] = S66(PMAXUW, Vx, Wx), [0x3F] = S66(PMAXUD, Vx, Wx),
+    [0x40] = S66(PMULLD, Vx, Wx), [0x41] = S66(PHMINPOSUW, Vx, Wx),
+    [0xC8] = {OP2(SHA1NEXTE, Vx, Wx, 0)}, [0xC9] = {OP2(SHA1MSG1, Vx, Wx, 0)},
+    [0xCA] = {OP2(SHA1MSG2, Vx, Wx, 0)}, [0xCB] = {OP2(SHA256RNDS2, Vx, Wx, 0)},
+    [0xCC] = {OP2(SHA256MSG1, Vx, Wx, 0)}, [0xCD] = {OP2(SHA256MSG2, Vx, Wx, 0)},
+    [0xDB] = S66(AESIMC, Vx, Wx), [0xDC] = S66(AESENC, Vx, Wx), [0xDD] = S66(AESENCLAST, Vx, Wx),
+    [0xDE] = S66(AESDEC, Vx, Wx), [0xDF] = S66(AESDECLAST, Vx, Wx),
+    [0x82] = {{0}, OP2(INVPCID, Gy, M, 0)},
+    [0xF0] = {OP2(MOVBE, Gv, Ev, 0), OP2(MOVBE, Gv, Ev, 0), {0}, OP2(CRC32, Gy, Eb, 0)},
+    [0xF1] = {OP2(MOVBE, Ev, Gv, 0), OP2(MOVBE, Ev, Gv, 0), {0}, OP2(CRC32, Gy, Ev, 0)},
+};
+
+static const OpDef pfx0f3a[256][4] = {
+    [0x08] = S66I(ROUNDPS, Vx, Wx), [0x09] = S66I(ROUNDPD, Vx, Wx),
+    [0x0A] = S66I(ROUNDSS, Vx, Wd), [0x0B] = S66I(ROUNDSD, Vx, Wq),
+    [0x0C] = S66I(BLENDPS, Vx, Wx), [0x0D] = S66I(BLENDPD, Vx, Wx), [0x0E] = S66I(PBLENDW, Vx, Wx),
+    [0x0F] = {OP3(PALIGNR, Pq, Qq, Ib, 0), OP3(PALIGNR, Vx, Wx, Ib, 0)},
+    [0x14] = S66I(PEXTRB, Ed, Vx), [0x15] = S66I(PEXTRW, Ed, Vx), [0x16] = S66I(PEXTRD, Ey, Vx),
+    [0x17] = S66I(EXTRACTPS, Ed, Vx),
+    [0x20] = S66I(PINSRB, Vx, Ed), [0x21] = S66I(INSERTPS, Vx, Wd), [0x22] = S66I(PINSRD, Vx, Ey),
+    [0x40] = S66I(DPPS, Vx, Wx), [0x41] = S66I(DPPD, Vx, Wx), [0x42] = S66I(MPSADBW, Vx, Wx),
+    [0x44] = S66I(PCLMULQDQ, Vx, Wx),
+    [0x60] = S66I(PCMPESTRM, Vx, Wx), [0x61] = S66I(PCMPESTRI, Vx, Wx),
+    [0x62] = S66I(PCMPISTRM, Vx, Wx), [0x63] = S66I(PCMPISTRI, Vx, Wx),
+    [0xCC] = {OP3(SHA1RNDS4, Vx, Wx, Ib, 0)},
+    [0xDF] = S66I(AESKEYGENASSIST, Vx, Wx),
 };
 
 /* Group tables: [group][0 = memory form, 1 = register form][ModRM.reg].
@@ -250,22 +315,25 @@ static const OpDef groups[NGROUPS][2][8] = {
     [G5] = SAME(OP1(INC, Ev, F_LOCK), OP1(DEC, Ev, F_LOCK), OP1(CALL, Ev, F_F64), OP1(CALLF, Mp, 0),
                 OP1(JMP, Ev, F_F64), OP1(JMPF, Mp, 0), OP1(PUSH, Ev, F_D64)),
     [G11] = SAME(OP0(MOV, 0)),
-    [G6] = SAME(OP1(GRP6, Ew, 0), OP1(GRP6, Ew, 0), OP1(GRP6, Ew, 0), OP1(GRP6, Ew, 0),
-                OP1(GRP6, Ew, 0), OP1(GRP6, Ew, 0)),
+    [G6] = {{OP1(SLDT, Ew, 0), OP1(STR, Ew, 0), OP1(LLDT, Ew, 0), OP1(LTR, Ew, 0),
+             OP1(VERR, Ew, 0), OP1(VERW, Ew, 0)},
+            {OP1(SLDT, Ev, 0), OP1(STR, Ev, 0), OP1(LLDT, Ew, 0), OP1(LTR, Ew, 0),
+             OP1(VERR, Ew, 0), OP1(VERW, Ew, 0)}},
     [G7] = {{OP1(SGDT, M, 0), OP1(SIDT, M, 0), OP1(LGDT, M, 0), OP1(LIDT, M, 0),
-             OP1(SMSW, Ew, 0), {0}, OP1(LMSW, Ew, 0), OP1(INVLPG, M, 0)},
+             OP1(SMSW, Ew, 0), OP1(RSTORSSP, M, 0), OP1(LMSW, Ew, 0), OP1(INVLPG, M, 0)},
             {OP0(GRP7R, 0), OP0(GRP7R, 0), OP0(GRP7R, 0), OP0(GRP7R, 0),
              OP1(SMSW, Ev, 0), OP0(GRP7R, 0), OP1(LMSW, Ew, 0), OP0(GRP7R, 0)}},
     [G8] = SAME({0}, {0}, {0}, {0}, OP2(BT, Ev, Ib, 0), OP2(BTS, Ev, Ib, F_LOCK),
                 OP2(BTR, Ev, Ib, F_LOCK), OP2(BTC, Ev, Ib, F_LOCK)),
     [G9] = {{{0}, OP1(CMPXCHG8B, Mq, F_LOCK)},
-            {[6] = OP1(RDRAND, Ev, 0), [7] = OP1(RDSEED, Ev, 0)}},
+            {[6] = OP1(RDRAND, Ev, 0), [7] = OP1(RDSEED, Ev, 0)}}, /* F3 /7 reg: RDPID (in exec) */
     [G12] = {{{0}}, {[2] = OP0(PSRLW, 0), [4] = OP0(PSRAW, 0), [6] = OP0(PSLLW, 0)}},
     [G13] = {{{0}}, {[2] = OP0(PSRLD, 0), [4] = OP0(PSRAD, 0), [6] = OP0(PSLLD, 0)}},
     [G14] = {{{0}}, {[2] = OP0(PSRLQ, 0), [3] = OP0(PSRLDQ, 0), [6] = OP0(PSLLQ, 0), [7] = OP0(PSLLDQ, 0)}},
     [G15] = {{OP1(FXSAVE, M, 0), OP1(FXRSTOR, M, 0), OP1(LDMXCSR, Md, 0), OP1(STMXCSR, Md, 0),
               OP1(XSAVE, M, 0), OP1(XRSTOR, M, 0), OP1(XSAVEOPT, M, 0), OP1(CLFLUSH, M, 0)},
-             {[5] = OP0(LFENCE, 0), [6] = OP0(MFENCE, 0), [7] = OP0(SFENCE, 0)}},
+             {OP1(RDFSBASE, Ey, 0), OP1(RDGSBASE, Ey, 0), OP1(WRFSBASE, Ey, 0), OP1(WRGSBASE, Ey, 0),
+              {0}, OP0(LFENCE, 0), OP0(MFENCE, 0), OP0(SFENCE, 0)}},
 };
 
 static int is_modrm_opnd(int o) {
@@ -273,46 +341,36 @@ static int is_modrm_opnd(int o) {
     case O_Eb: case O_Ew: case O_Ed: case O_Eq: case O_Ev: case O_Ey:
     case O_Gb: case O_Gw: case O_Gd: case O_Gq: case O_Gv: case O_Gy:
     case O_M: case O_Mp: case O_Mq: case O_Md: case O_Sw:
-    case O_Vx: case O_Wx: case O_Wq: case O_Wd: case O_Ux:
+    case O_Vx: case O_Wx: case O_Wq: case O_Wd: case O_Ux: case O_Ww:
+    case O_Pq: case O_Qq: case O_Nq: case O_Cd: case O_Dd: case O_Ry:
         return 1;
     }
     return 0;
 }
 
-int opnd_size(const Insn *in, int spec) {
-    int os = in->opsize;
-    switch (spec) {
-    case O_Eb: case O_Gb: case O_Zb: case O_Ib: case O_Ib2: case O_AL: case O_CL:
-    case O_Ob: case O_Xb: case O_Yb: case O_1: case O_Jb:
-        return 1;
-    case O_Ew: case O_Gw: case O_Iw: case O_Sw: case O_DX:
-    case O_ES: case O_CS: case O_SS: case O_DS: case O_FS: case O_GS:
-        return 2;
-    case O_Ed: case O_Gd: case O_Md: case O_Wd:
-        return 4;
-    case O_Eq: case O_Gq: case O_Wq:
-        return 8;
-    case O_Mq:
-        return (in->rex & 8) ? 16 : 8;
-    case O_Ev: case O_Gv: case O_Zv: case O_rAX: case O_Ov: case O_Xv: case O_Yv:
-    case O_Iv: case O_Ibs: case O_Iz: case O_Jz:
-        return os;
-    case O_Ey: case O_Gy:
-        return os == 8 ? 8 : 4;
-    case O_eAX:
-        return os == 2 ? 2 : 4;
-    case O_Mp:
-        return os + 2;
-    case O_Vx: case O_Wx: case O_Ux:
-        return 16;
-    }
-    return 0;
-}
+/* Operand sizes for opnd_size(): bytes, or a negative code for sizes that
+ * depend on the instruction (see decode.h). */
+const int8_t opnd_kind[O_COUNT] = {
+    [O_Eb] = 1, [O_Gb] = 1, [O_Zb] = 1, [O_Ib] = 1, [O_Ib2] = 1, [O_AL] = 1, [O_CL] = 1,
+    [O_Ob] = 1, [O_Xb] = 1, [O_Yb] = 1, [O_1] = 1, [O_Jb] = 1,
+    [O_Ew] = 2, [O_Gw] = 2, [O_Iw] = 2, [O_Sw] = 2, [O_DX] = 2,
+    [O_ES] = 2, [O_CS] = 2, [O_SS] = 2, [O_DS] = 2, [O_FS] = 2, [O_GS] = 2, [O_Ww] = 2,
+    [O_Ed] = 4, [O_Gd] = 4, [O_Md] = 4, [O_Wd] = 4,
+    [O_Eq] = 8, [O_Gq] = 8, [O_Wq] = 8, [O_Pq] = 8, [O_Qq] = 8, [O_Nq] = 8,
+    [O_Vx] = 16, [O_Wx] = 16, [O_Ux] = 16,
+    [O_Mq] = OK_MQ,
+    [O_Ev] = OK_OS, [O_Gv] = OK_OS, [O_Zv] = OK_OS, [O_rAX] = OK_OS, [O_Ov] = OK_OS, [O_Xv] = OK_OS,
+    [O_Yv] = OK_OS, [O_Iv] = OK_OS, [O_Ibs] = OK_OS, [O_Iz] = OK_OS, [O_Jz] = OK_OS,
+    [O_Ey] = OK_Y, [O_Gy] = OK_Y,
+    [O_Ry] = OK_MODE, [O_Cd] = OK_MODE, [O_Dd] = OK_MODE,
+    [O_eAX] = OK_EAX,
+    [O_Mp] = OK_MP,
+};
 
 int opnd_is_mem(const Insn *in, int spec) {
     switch (spec) {
     case O_Eb: case O_Ew: case O_Ed: case O_Eq: case O_Ev: case O_Ey:
-    case O_Wx: case O_Wq: case O_Wd:
+    case O_Wx: case O_Wq: case O_Wd: case O_Ww: case O_Qq:
         return in->mod != 3;
     case O_M: case O_Mp: case O_Mq: case O_Md: case O_Ob: case O_Ov:
         return 1;
@@ -444,11 +502,7 @@ legacy:
             NEED(1);
             in->map = b == 0x38 ? 2 : 3;
             in->opcode = buf[p++];
-            def = (in->map == 2 ? map0f38 : map0f3a)[in->opcode];
-            if (!def.id) {
-                def.f = F_MODRM;
-                imm8_follows = in->map == 3;
-            }
+            def = (OpDef)PF;
         } else {
             in->map = 1;
             in->opcode = b;
@@ -465,7 +519,13 @@ legacy:
     }
     if (def.f & F_PFX) {
         int slot = in->rep == 0xF3 ? 2 : in->rep == 0xF2 ? 3 : in->pfx66 ? 1 : 0;
-        def = pfxtab[def.grp][slot];
+        const OpDef (*tab)[4] = in->map == 1 ? pfx0f : in->map == 2 ? pfx0f38 : pfx0f3a;
+        def = tab[in->opcode][slot];
+        if (!def.id && !(def.f & F_GRP)) {
+            /* undefined: still determine the length (ModRM, plus imm8 in map 3) */
+            def.f = F_MODRM;
+            imm8_follows = in->map == 3;
+        }
     }
 
 have_def:;
@@ -478,6 +538,7 @@ have_def:;
         in->has_modrm = 1;
         in->modrm = m;
         in->mod = m >> 6;
+        if (def.f & F_REG) in->mod = 3;
         in->reg = ((m >> 3) & 7) | ((in->rex & 4) ? 8 : 0);
         uint8_t rm = m & 7;
         if (in->mod == 3) {
@@ -583,7 +644,7 @@ have_def:;
         case O_M: case O_Mp: case O_Mq: case O_Md:
             if (in->mod == 3) { in->len = (uint8_t)p; return DEC_INVALID; }
             continue;
-        case O_Ux:
+        case O_Ux: case O_Nq:
             if (in->mod != 3) { in->len = (uint8_t)p; return DEC_INVALID; }
             continue;
         default:
@@ -606,6 +667,19 @@ have_def:;
         if (mode != 64) t &= in->opsize == 2 ? 0xFFFF : 0xFFFFFFFF;
         in->target = t;
     }
+
+    /* CET instructions that share encodings with hints and fences (F3 prefix) */
+    if (in->map == 1 && in->rep == 0xF3) {
+        if (in->opcode == 0x1E && in->modrm == 0xFA) in->id = I_ENDBR64, in->opnd[0] = 0;
+        else if (in->opcode == 0x1E && in->modrm == 0xFB) in->id = I_ENDBR32, in->opnd[0] = 0;
+        else if (in->opcode == 0x1E && in->mod == 3 && (in->reg & 7) == 1) in->id = I_RDSSP, in->opnd[0] = O_Ey;
+        else if (in->id == I_LFENCE) in->id = I_INCSSP, in->opnd[0] = O_Ey;
+        else if (in->id == I_XSAVEOPT) in->id = I_CLRSSBSY;
+        else if (in->id == I_GRP7R && in->modrm == 0xE8) in->id = I_SETSSBSY;
+        else if (in->id == I_GRP7R && in->modrm == 0xEA) in->id = I_SAVEPREVSSP;
+    }
+    if (in->id == I_RSTORSSP && in->rep != 0xF3) return DEC_INVALID;
+    if ((in->id == I_WRSS || in->id == I_WRUSS) && in->mod == 3) return DEC_INVALID;
 
     if (!def.id) return DEC_INVALID;
     if ((f & F_I64) && mode == 64) return DEC_INVALID;

@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cache.h"
+#include "cpu_internal.h"
+#include "pc.h"
+
 /* ---- buffers ---- */
 
 void buf_append(Buf *b, const void *data, size_t n) {
@@ -54,6 +58,15 @@ void machine_init(Machine *m) {
 }
 
 static void free_program_state(Machine *m) {
+    if (m->pc) pc_destroy(m->pc);
+    m->pc = NULL;
+    for (int i = 1; i < MAX_CPUS; i++) {
+        free(m->cpus[i]);
+        m->cpus[i] = NULL;
+    }
+    cache_free(m->cache);
+    m->cache = NULL;
+    m->cpu.cache = NULL;
     mem_free(m->mem);
     m->mem = NULL;
     for (int i = 0; i < m->nsyms; i++) free(m->syms[i].name);
@@ -102,10 +115,25 @@ int machine_reset(Machine *m, char *err, size_t errn) {
     m->state = MS_READY;
     m->exit_code = 0;
     m->last_stop = STOP_NONE;
+    m->cpus[0] = &m->cpu;
+    m->ncpu = 1;
+    m->cur_cpu = m->view_cpu = 0;
+    m->cycles = 0;
     snprintf(m->status, sizeof m->status, "ready");
+    if (m->pc_mode) {
+        m->pc = pc_create(m);
+        return pc_load(m, err, errn);
+    }
     if (load_program(m, err, errn)) return -1;
     os_install(m);
     return 0;
+}
+
+void machine_rebind(Machine *m) {
+    m->cpus[0] = &m->cpu;
+    m->cpu.mem = m->mem;
+    for (int i = 0; i < m->ncpu; i++) m->cpus[i]->user = m;
+    if (m->pc) pc_rebind(m);
 }
 
 /* ---- execution ---- */
@@ -135,8 +163,66 @@ static int blocked_reason(Machine *m) {
     return STOP_NONE;
 }
 
+/* Why CPU i stopped the machine (PC mode), or STOP_NONE. */
+static int pc_cpu_stop(Machine *m, int i, StepResult r, uint64_t rip) {
+    if (r == STEP_OK || r == STEP_HALT) return STOP_NONE;
+    CPU *c = m->cpus[i];
+    char who[16] = "";
+    if (m->ncpu > 1) snprintf(who, sizeof who, "cpu%d: ", i);
+    if (r == STEP_SHUTDOWN) {
+        m->state = MS_FAULT;
+        snprintf(m->status, sizeof m->status, "%striple fault at 0x%llx (last exception: %s)", who,
+                 (unsigned long long)rip, cpu_exc_name(c->last_exc));
+        return STOP_FAULT;
+    }
+    if (r == STEP_STOP) return m->last_stop;
+    if (r != STEP_EXCEPTION) return STOP_NONE;
+    if (c->exc_vector == EXC_BP) {
+        snprintf(m->status, sizeof m->status, "%sint3 breakpoint at 0x%llx", who, (unsigned long long)rip);
+        return STOP_TRAP;
+    }
+    m->state = MS_FAULT;
+    m->view_cpu = i;
+    snprintf(m->status, sizeof m->status, "%s%s at 0x%llx", who, c->exc_msg, (unsigned long long)rip);
+    return STOP_FAULT;
+}
+
+/* PC mode: every running CPU executes one instruction (round robin, so
+ * the interleaving is deterministic), then the devices catch up. The clock
+ * advances by one per round in which some CPU completed an instruction. */
+static int pc_round(Machine *m) {
+    int all_halted = 1, stop = STOP_NONE;
+    uint64_t adv = 0;
+    for (int i = 0; i < m->ncpu && !stop; i++) {
+        CPU *c = m->cpus[i];
+        if (c->wait_sipi) continue;
+        m->cur_cpu = i;
+        uint64_t rip = c->rip, ic = c->icount;
+        StepResult r = cpu_step(c);
+        if (c->icount - ic > adv) adv = c->icount - ic;
+        if (r != STEP_HALT) all_halted = 0;
+        stop = pc_cpu_stop(m, i, r, rip);
+    }
+    m->cur_cpu = 0;
+    m->cycles += adv;
+    m->bits = machine_cpu(m)->bits;
+    pc_tick(m);
+    if (stop) return stop;
+    if (m->state == MS_EXITED || m->state == MS_HALTED) return m->last_stop ? m->last_stop : STOP_EXIT;
+    if (all_halted) {
+        int idle = pc_idle(m);
+        if (idle == 2 && m->yield_on_idle) return STOP_LIMIT;
+        if (idle) return STOP_NONE;
+        m->state = MS_HALTED;
+        snprintf(m->status, sizeof m->status, "halted at 0x%llx with interrupts disabled",
+                 (unsigned long long)m->cpu.rip);
+        return STOP_HALT;
+    }
+    return STOP_NONE;
+}
+
 static int do_step(Machine *m) {
-    CPU *c = &m->cpu;
+    CPU *c = machine_cpu(m);
     uint64_t rip = c->rip;
     if (m->trace_print) {
         Insn in;
@@ -148,6 +234,7 @@ static int do_step(Machine *m) {
     if (m->state == MS_WAIT_INPUT) m->state = MS_READY;
     m->last_stop = STOP_NONE;
 
+    if (m->pc) return pc_round(m);
     StepResult r = cpu_step(c);
     if (r == STEP_OK) return STOP_NONE;
     if (r == STEP_STOP) {
@@ -184,12 +271,26 @@ int machine_step(Machine *m) {
     return m->last_stop = r ? r : STOP_STEP;
 }
 
+/* Some CPU is at a breakpoint: the debugger switches to it. */
+static int machine_at_bp(Machine *m) {
+    for (int i = 0; i < m->ncpu; i++) {
+        CPU *c = m->cpus[i];
+        if (!c->wait_sipi && !c->halted && machine_has_bp(m, c->rip)) {
+            char who[16] = "";
+            if (m->ncpu > 1) snprintf(who, sizeof who, "cpu%d: ", i);
+            m->view_cpu = i;
+            snprintf(m->status, sizeof m->status, "%sbreakpoint at 0x%llx", who, (unsigned long long)c->rip);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int machine_run(Machine *m, uint64_t max) {
     int b = blocked_reason(m);
     if (b) return m->last_stop = b;
     for (uint64_t i = 0; i < max; i++) {
-        if (i > 0 && m->nbp && machine_has_bp(m, m->cpu.rip)) {
-            snprintf(m->status, sizeof m->status, "breakpoint at 0x%llx", (unsigned long long)m->cpu.rip);
+        if (i > 0 && m->nbp && machine_at_bp(m)) {
             return m->last_stop = STOP_BREAKPOINT;
         }
         int r = do_step(m);
@@ -201,18 +302,18 @@ int machine_run(Machine *m, uint64_t max) {
 int machine_step_over(Machine *m, uint64_t max) {
     int b = blocked_reason(m);
     if (b) return m->last_stop = b;
+    CPU *c = machine_cpu(m);
     Insn in;
-    machine_disasm(m, m->cpu.rip, &in, NULL, 0);
+    machine_disasm(m, c->rip, &in, NULL, 0);
     if (in.id != I_CALL) return machine_step(m);
-    uint64_t target = m->cpu.rip + in.len, sp0 = m->cpu.r[RSP];
+    uint64_t target = c->rip + in.len, sp0 = c->r[RSP];
     for (uint64_t i = 0; i < max; i++) {
-        if (i > 0 && m->nbp && machine_has_bp(m, m->cpu.rip)) {
-            snprintf(m->status, sizeof m->status, "breakpoint at 0x%llx", (unsigned long long)m->cpu.rip);
+        if (i > 0 && m->nbp && machine_at_bp(m)) {
             return m->last_stop = STOP_BREAKPOINT;
         }
         int r = do_step(m);
         if (r) return m->last_stop = r;
-        if (m->cpu.rip == target && m->cpu.r[RSP] >= sp0) return m->last_stop = STOP_STEP;
+        if (c->rip == target && c->r[RSP] >= sp0) return m->last_stop = STOP_STEP;
     }
     return m->last_stop = STOP_LIMIT;
 }
@@ -220,15 +321,15 @@ int machine_step_over(Machine *m, uint64_t max) {
 int machine_step_out(Machine *m, uint64_t max) {
     int b = blocked_reason(m);
     if (b) return m->last_stop = b;
-    uint64_t sp0 = m->cpu.r[RSP];
+    CPU *c = machine_cpu(m);
+    uint64_t sp0 = c->r[RSP];
     for (uint64_t i = 0; i < max; i++) {
-        if (i > 0 && m->nbp && machine_has_bp(m, m->cpu.rip)) {
-            snprintf(m->status, sizeof m->status, "breakpoint at 0x%llx", (unsigned long long)m->cpu.rip);
+        if (i > 0 && m->nbp && machine_at_bp(m)) {
             return m->last_stop = STOP_BREAKPOINT;
         }
         Insn in;
-        machine_disasm(m, m->cpu.rip, &in, NULL, 0);
-        int is_ret = in.id == I_RET && m->cpu.r[RSP] >= sp0;
+        machine_disasm(m, c->rip, &in, NULL, 0);
+        int is_ret = in.id == I_RET && c->r[RSP] >= sp0;
         int r = do_step(m);
         if (r) return m->last_stop = r;
         if (is_ret) return m->last_stop = STOP_STEP;
@@ -300,11 +401,43 @@ int machine_symname(void *ctx, uint64_t addr, char *buf, size_t n) {
     return 1;
 }
 
+/* Read guest memory at a linear address, through the page tables when the
+ * CPU has paging on. Returns the bytes read (stops at an unmapped page). */
+size_t machine_phys_peek(Machine *m, uint64_t pa, void *buf, size_t n) {
+    size_t got = mem_peek(m->mem, pa, buf, n);
+    if (m->cache) cache_peek(m->cache, pa, buf, got);
+    return got;
+}
+
+size_t machine_phys_poke(Machine *m, uint64_t pa, const void *buf, size_t n) {
+    size_t done = mem_poke(m->mem, pa, buf, n);
+    if (m->cache) cache_poke(m->cache, pa, buf, done);
+    if (done) icache_written(&m->cpu, pa, done);
+    return done;
+}
+
+size_t machine_peek(Machine *m, uint64_t lin, void *buf, size_t n) {
+    CPU *c = machine_cpu(m);
+    if (!c->sys) return mem_peek(m->mem, lin, buf, n);
+    size_t done = 0;
+    while (done < n) {
+        uint64_t pa, a = lin + done;
+        size_t k = 4096 - (a & 0xFFF);
+        if (k > n - done) k = n - done;
+        if (cpu_virt_to_phys(c, a, &pa)) break;
+        size_t got = machine_phys_peek(m, pa, (uint8_t *)buf + done, k);
+        done += got;
+        if (got < k) break;
+    }
+    return done;
+}
+
 int machine_disasm(Machine *m, uint64_t addr, Insn *in, char *text, size_t n) {
     uint8_t buf[15];
-    uint64_t lin = (m->cpu.sbase[CS] + addr) & (m->cpu.bits == 64 ? ~0ULL : 0xFFFFFFFFULL);
-    size_t got = mem_peek(m->mem, lin, buf, sizeof buf);
-    int r = decode(buf, (int)got, addr, m->cpu.bits, in);
+    CPU *c = machine_cpu(m);
+    uint64_t lin = (c->sbase[CS] + addr) & (c->bits == 64 ? ~0ULL : 0xFFFFFFFFULL);
+    size_t got = machine_peek(m, lin, buf, sizeof buf);
+    int r = decode(buf, (int)got, addr, c->bits, in);
     if (r != DEC_OK) {
         int len = in->len ? in->len : 1;
         memset(in, 0, sizeof *in);

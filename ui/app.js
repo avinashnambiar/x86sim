@@ -90,7 +90,19 @@ function resolveLocal(expr) {
 function renderHeader(st) {
   $('program').textContent = st.program.join(' ');
   $('program').title = st.program.join('\n');
-  $('mode').textContent = `${st.bits === 16 ? '16-bit real mode' : st.bits + '-bit'} · ${st.os}`;
+  if (st.sys) {
+    const names = { real: 'real mode', vm86: 'virtual-8086', protected: '32-bit protected', compat: 'compatibility mode', long: '64-bit long mode' };
+    $('mode').textContent = `PC · ${names[st.sys.mode] || st.sys.mode} · CPL ${st.sys.cpl}${st.sys.paging ? ' · paging' : ''}`;
+  } else {
+    $('mode').textContent = `${st.bits === 16 ? '16-bit real mode' : st.bits + '-bit'} · ${st.os}`;
+  }
+  $('tab-btn-screen').classList.toggle('hidden', st.os !== 'pc');
+  $('tab-btn-cache').classList.toggle('hidden', !st.cache);
+  renderCpus(st);
+  if (st.os === 'pc' && !S.screenShown) {
+    S.screenShown = true;
+    selectTab('screen');
+  }
   const state = S.running ? 'running' : st.state;
   const pill = $('state');
   pill.className = 'pill ' + state;
@@ -108,6 +120,71 @@ function renderHeader(st) {
   $('btn-load').disabled = S.running;
   $('input-form').classList.toggle('waiting', st.state === 'wait_input');
 }
+
+/* CPU switcher: shown with more than one CPU; the registers, disassembly,
+ * stack and memory views follow the selected CPU. */
+function renderCpus(st) {
+  const box = $('cpu-select');
+  const cpus = st.cpus || [];
+  box.classList.toggle('hidden', cpus.length < 2);
+  if (cpus.length < 2) return;
+  box.innerHTML = cpus.map((c, i) =>
+    `<button class="cpu-btn${i === st.view_cpu ? ' on' : ''}" data-cpu="${i}" role="tab" aria-selected="${i === st.view_cpu}" title="cpu${i}: ${c.state}, ${Number(c.icount).toLocaleString()} instructions"><span class="dot ${c.state}"></span>cpu${i}</button>`).join('');
+}
+$('cpu-select').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-cpu]');
+  if (!b || S.running) return;
+  try {
+    S.follow = true;
+    const st = await post('/api/cpu?n=' + b.dataset.cpu);
+    S.prev = null;
+    await refresh(st);
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+/* ---------- caches ---------- */
+
+const MESI_CLASS = { M: 'st-m', E: 'st-e', S: 'st-s', I: 'st-i' };
+
+function pct(a, b) { return b ? (100 * a / b).toFixed(2) + '%' : '—'; }
+function num(n) { return Number(n).toLocaleString(); }
+
+async function renderCache() {
+  const addr = $('line-addr').value.trim();
+  const res = await api('/api/cache?log=60' + (addr ? '&addr=' + encodeURIComponent(addr) : ''));
+  if (!res.enabled) {
+    $('cache-table').innerHTML = '<tr><td class="muted">Caches are not simulated (start with --cache).</td></tr>';
+    return;
+  }
+  let html = '<tr><th>cache</th><th>geometry</th><th>hit rate</th><th>accesses</th><th>misses</th><th>evictions</th><th>writebacks</th><th title="copies invalidated by other caches or by L2 eviction">invalidated</th><th title="modified lines supplied to another cache">interventions</th><th title="S to M through BusUpgr">upgrades</th><th>lines (M E S I)</th></tr>';
+  for (const c of res.caches) {
+    const acc = c.reads + c.writes + c.fetches;
+    const total = c.sets * c.ways;
+    const bar = ['M', 'E', 'S', 'I'].map((k) => c.lines[k] ? `<span class="${MESI_CLASS[k]}" style="width:${(100 * c.lines[k] / total).toFixed(2)}%" title="${k}: ${num(c.lines[k])} lines"></span>` : '').join('');
+    html += `<tr><td>${esc(c.name)}</td><td class="muted">${c.sets}×${c.ways}</td><td>${pct(c.hits, acc)}</td><td>${num(acc)}</td><td>${num(c.misses)}</td><td>${num(c.evictions)}</td><td>${num(c.writebacks)}</td><td>${num(c.invalidations)}</td><td>${num(c.interventions)}</td><td>${num(c.upgrades)}</td><td><div class="mesi-bar">${bar}</div><span class="muted">${c.lines.M} ${c.lines.E} ${c.lines.S} ${c.lines.I}</span></td></tr>`;
+  }
+  $('cache-table').innerHTML = html;
+  const b = res.bus;
+  $('cache-bus').innerHTML = `<b>bus</b> BusRd ${num(b.BusRd)} · BusRdX ${num(b.BusRdX)} · BusUpgr ${num(b.BusUpgr)} · BusWB ${num(b.BusWB)} · cache-to-cache ${num(b.c2c)} &nbsp; <b>memory</b> ${num(b.mem_reads)} line reads · ${num(b.mem_writes)} line writes · ${num(b.uncached)} uncached`;
+  if (res.line) {
+    const l = res.line;
+    const badges = l.states.map(([n, st]) => {
+      const k = st === 'dirty' ? 'M' : st === 'clean' ? 'E' : st;
+      return `<div class="line-unit"><span>${esc(n)}</span><span class="state ${MESI_CLASS[k] || ''}">${esc(st)}</span></div>`;
+    }).join('');
+    const data = l.data.replace(/(..)/g, '$1 ').trim().replace(/((?:.. ){15}..) /g, '$1\n');
+    $('line-view').className = 'line-view';
+    $('line-view').innerHTML = `<div class="muted">line ${esc(l.addr)} · L1 set ${l.l1_set} · L2 set ${l.l2_set}${l.cacheable ? '' : ' · uncacheable'}</div>${badges}<pre class="line-data">${data}</pre>`;
+  }
+  $('cache-events').textContent = `(${num(res.events)})`;
+  $('cache-log').innerHTML = res.log.length ? res.log.map((x) => `<div>${esc(x)}</div>`).join('') : '<div class="muted">no bus traffic yet</div>';
+  const body = $('tab-cache');
+  if (S.cacheStick !== false) $('cache-log').lastElementChild?.scrollIntoView({ block: 'nearest' });
+  void body;
+}
+$('line-form').addEventListener('submit', (e) => { e.preventDefault(); renderTab(); });
 
 function fmtValue(v, digits) {
   const s = hex(v, digits);
@@ -143,6 +220,15 @@ function renderRegs(st) {
     .filter(([n, sel, base]) => st.bits === 16 || sel || big(base))
     .map(([n, sel, base]) => `<span><b>${n}</b> ${hex(sel, 4)}${big(base) ? ' <b>base</b> ' + hex(big(base)) : ''}</span>`)
     .join('');
+
+  const sr = $('sysregs');
+  sr.classList.toggle('hidden', !st.sys);
+  if (st.sys) {
+    sr.innerHTML = ['cr0', 'cr2', 'cr3', 'cr4', 'efer'].map((n) => {
+      const changed = prev && prev.sys && prev.sys[n] !== st.sys[n];
+      return `<span class="${changed ? 'changed' : ''}"><b>${n}</b> ${hex(big(st.sys[n]))}</span>`;
+    }).join('') + `<span><b>time</b> ${(Number(st.sys.time_ns) / 1e9).toFixed(3)} s</span>`;
+  }
 
   const xmm = $('xmm');
   xmm.classList.toggle('hidden', !S.showXmm);
@@ -280,8 +366,110 @@ async function renderOutput(st) {
   body.scrollTop = body.scrollHeight;
 }
 
-async function renderTab() {
+/* ---------- PC screen ---------- */
+
+const VGA_COLORS = ['#000000', '#0000aa', '#00aa00', '#00aaaa', '#aa0000', '#aa00aa', '#aa5500', '#aaaaaa',
+  '#555555', '#5555ff', '#55ff55', '#55ffff', '#ff5555', '#ff55ff', '#ffff55', '#ffffff'];
+
+function hexBytes(h) {
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
+  return out;
+}
+
+async function renderScreen() {
+  if (S.tab !== 'screen' || !S.st || S.st.os !== 'pc') return;
+  let res;
   try {
+    res = await api('/api/screen');
+  } catch (e) {
+    return;
+  }
+  const pre = $('screen'), cv = $('screen-gfx');
+  if (res.mode === 19) {
+    pre.classList.add('hidden');
+    cv.classList.remove('hidden');
+    const px = hexBytes(res.pixels), pal = hexBytes(res.palette);
+    const ctx = cv.getContext('2d');
+    const img = ctx.createImageData(320, 200);
+    for (let i = 0; i < 64000; i++) {
+      const c = px[i] * 3;
+      img.data[i * 4] = pal[c] * 4.05;
+      img.data[i * 4 + 1] = pal[c + 1] * 4.05;
+      img.data[i * 4 + 2] = pal[c + 2] * 4.05;
+      img.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    return;
+  }
+  cv.classList.add('hidden');
+  pre.classList.remove('hidden');
+  const cells = hexBytes(res.cells);
+  let html = '';
+  for (let r = 0; r < res.rows; r++) {
+    let run = '', attr = -1;
+    const flush = () => {
+      if (run) html += `<span style="color:${VGA_COLORS[attr & 15]};background:${VGA_COLORS[(attr >> 4) & 7]}">${run}</span>`;
+      run = '';
+    };
+    for (let c = 0; c < res.cols; c++) {
+      const i = r * res.cols + c;
+      let ch = cells[i * 2], a = cells[i * 2 + 1];
+      let t = ch < 32 || ch > 126 ? (ch === 0 ? ' ' : String.fromCharCode(CP437[ch] || 0x2022)) : String.fromCharCode(ch);
+      t = esc(t);
+      if (i === res.cursor) {
+        flush();
+        html += `<span class="cursor" style="color:${VGA_COLORS[a & 15]}">${t}</span>`;
+        attr = -1;
+        continue;
+      }
+      if (a !== attr) { flush(); attr = a; }
+      run += t;
+    }
+    flush();
+    html += '\n';
+  }
+  pre.innerHTML = html;
+}
+
+/* CP437 glyphs for control and high characters */
+const CP437 = (() => {
+  const t = [];
+  const low = '\u263a\u263b\u2665\u2666\u2663\u2660\u2022\u25d8\u25cb\u25d9\u2642\u2640\u266a\u266b\u263c\u25ba\u25c4\u2195\u203c\u00b6\u00a7\u25ac\u21a8\u2191\u2193\u2192\u2190\u221f\u2194\u25b2\u25bc';
+  for (let i = 1; i < 32; i++) t[i] = low.charCodeAt(i - 1);
+  const high = '\u00c7\u00fc\u00e9\u00e2\u00e4\u00e0\u00e5\u00e7\u00ea\u00eb\u00e8\u00ef\u00ee\u00ec\u00c4\u00c5\u00c9\u00e6\u00c6\u00f4\u00f6\u00f2\u00fb\u00f9\u00ff\u00d6\u00dc\u00a2\u00a3\u00a5\u20a7\u0192\u00e1\u00ed\u00f3\u00fa\u00f1\u00d1\u00aa\u00ba\u00bf\u2310\u00ac\u00bd\u00bc\u00a1\u00ab\u00bb\u2591\u2592\u2593\u2502\u2524\u2561\u2562\u2556\u2555\u2563\u2551\u2557\u255d\u255c\u255b\u2510\u2514\u2534\u252c\u251c\u2500\u253c\u255e\u255f\u255a\u2554\u2569\u2566\u2560\u2550\u256c\u2567\u2568\u2564\u2565\u2559\u2558\u2552\u2553\u256b\u256a\u2518\u250c\u2588\u2584\u258c\u2590\u2580\u03b1\u00df\u0393\u03c0\u03a3\u03c3\u00b5\u03c4\u03a6\u0398\u03a9\u03b4\u221e\u03c6\u03b5\u2229\u2261\u00b1\u2265\u2264\u2320\u2321\u00f7\u2248\u00b0\u2219\u00b7\u221a\u207f\u00b2\u25a0\u00a0';
+  for (let i = 128; i < 256; i++) t[i] = high.charCodeAt(i - 128);
+  t[127] = 0x2302;
+  return t;
+})();
+
+/* Keys typed on the screen become bytes for the PC (terminal conventions). */
+function keyBytes(e) {
+  const map = { Enter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b', ArrowUp: '\x1b[A', ArrowDown: '\x1b[B',
+    ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D', Home: '\x1b[H', End: '\x1b[F' };
+  if (map[e.key]) return map[e.key];
+  if (e.ctrlKey && e.key.length === 1 && /[a-z]/i.test(e.key)) return String.fromCharCode(e.key.toLowerCase().charCodeAt(0) - 96);
+  if (e.key.length === 1 && !e.metaKey) return e.key;
+  return null;
+}
+
+$('screen').addEventListener('keydown', async (e) => {
+  const bytes = keyBytes(e);
+  if (bytes === null) return;
+  e.preventDefault();
+  e.stopPropagation();
+  try {
+    await post('/api/input', bytes);
+    if (!S.running) runLoop();
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+async function renderTab() {
+  if (S.tab === 'screen') return renderScreen();
+  try {
+    if (S.tab === 'cache') return await renderCache();
     if (S.tab === 'syscalls') {
       const res = await api('/api/syscalls');
       $('syscalls').innerHTML = res.lines.length ? res.lines.map((l) => `<div>${esc(l)}</div>`).join('') : '<div class="muted">no system calls yet</div>';
@@ -355,6 +543,10 @@ async function runLoop() {
       S.st = st;
       renderHeader(st);
       await renderOutput(st);
+      if (S.tab === 'screen' && Date.now() - (S.screenAt || 0) > 100) {
+        S.screenAt = Date.now();
+        await renderScreen();
+      }
       if (st.stop !== 'limit' || S.pause) break;
     }
   } catch (e) {
@@ -503,16 +695,15 @@ const memMove = (delta) => {
 $('btn-mem-up').onclick = () => memMove(-256);
 $('btn-mem-down').onclick = () => memMove(256);
 
-document.querySelectorAll('.tab').forEach((t) => {
-  t.onclick = () => {
-    S.tab = t.dataset.tab;
-    document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
-    for (const name of ['console', 'syscalls', 'trace', 'maps', 'symbols'])
-      $('tab-' + name).classList.toggle('hidden', name !== S.tab);
-    $('input-form').classList.toggle('hidden', S.tab !== 'console');
-    renderTab();
-  };
-});
+function selectTab(name) {
+  S.tab = name;
+  document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === name));
+  for (const n of ['screen', 'console', 'syscalls', 'trace', 'maps', 'cache', 'symbols'])
+    $('tab-' + n).classList.toggle('hidden', n !== name);
+  $('input-form').classList.toggle('hidden', name !== 'console');
+  renderTab();
+}
+document.querySelectorAll('.tab').forEach((t) => { t.onclick = () => selectTab(t.dataset.tab); });
 $('sym-filter').addEventListener('input', renderTab);
 for (const id of ['trace', 'symbols']) {
   $(id).addEventListener('click', (e) => {
@@ -562,7 +753,7 @@ $('load-ok').addEventListener('click', async (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
+  const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName) || document.activeElement.id === 'screen';
   if (e.key === 'F10') { e.preventDefault(); act('/api/next'); }
   else if (e.key === 'F11' && e.shiftKey) { e.preventDefault(); act('/api/finish'); }
   else if (e.key === 'F11') { e.preventDefault(); act('/api/step'); }

@@ -16,6 +16,7 @@ static const char *const r8rex[16] = {"al", "cl", "dl", "bl", "spl", "bpl", "sil
                                       "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b"};
 static const char *const r8leg[8] = {"al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"};
 static const char *const sregs[8] = {"es", "cs", "ss", "ds", "fs", "gs", "?", "?"};
+static const char *const mmx[8] = {"mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7"};
 static const char *const xmm[16] = {"xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
                                     "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
 
@@ -103,11 +104,17 @@ static int string_elem_size(const Insn *in) {
     return in->opsize;
 }
 
-static const char *grp6_names[8] = {"sldt", "str", "lldt", "ltr", "verr", "verw", "(bad)", "(bad)"};
-
 static const char *grp7r_name(uint8_t modrm) {
     switch (modrm) {
     case 0xC1: return "vmcall";
+    case 0xC2: return "vmlaunch";
+    case 0xC3: return "vmresume";
+    case 0xC4: return "vmxoff";
+    case 0xE8: return "serialize";
+    case 0xEE: return "rdpkru";
+    case 0xEF: return "wrpkru";
+    case 0xFA: return "monitorx";
+    case 0xFB: return "mwaitx";
     case 0xC8: return "monitor";
     case 0xC9: return "mwait";
     case 0xCA: return "clac";
@@ -118,6 +125,98 @@ static const char *grp7r_name(uint8_t modrm) {
     case 0xF9: return "rdtscp";
     }
     return "(grp7)";
+}
+
+/* ---- x87 ---- */
+
+static const char *const x87_arith[8] = {"fadd", "fmul", "fcom", "fcomp", "fsub", "fsubr", "fdiv", "fdivr"};
+static const char *const x87_iarith[8] = {"fiadd", "fimul", "ficom", "ficomp", "fisub", "fisubr", "fidiv", "fidivr"};
+
+/* memory forms: name and operand size, indexed [opcode & 7][reg] */
+static const struct { const char *name; uint8_t size; } x87_mem[8][8] = {
+    {{"fadd", 4}, {"fmul", 4}, {"fcom", 4}, {"fcomp", 4}, {"fsub", 4}, {"fsubr", 4}, {"fdiv", 4}, {"fdivr", 4}},
+    {{"fld", 4}, {0, 0}, {"fst", 4}, {"fstp", 4}, {"fldenv", 0}, {"fldcw", 2}, {"fnstenv", 0}, {"fnstcw", 2}},
+    {{"fiadd", 4}, {"fimul", 4}, {"ficom", 4}, {"ficomp", 4}, {"fisub", 4}, {"fisubr", 4}, {"fidiv", 4}, {"fidivr", 4}},
+    {{"fild", 4}, {"fisttp", 4}, {"fist", 4}, {"fistp", 4}, {0, 0}, {"fld", 10}, {0, 0}, {"fstp", 10}},
+    {{"fadd", 8}, {"fmul", 8}, {"fcom", 8}, {"fcomp", 8}, {"fsub", 8}, {"fsubr", 8}, {"fdiv", 8}, {"fdivr", 8}},
+    {{"fld", 8}, {"fisttp", 8}, {"fst", 8}, {"fstp", 8}, {"frstor", 0}, {0, 0}, {"fnsave", 0}, {"fnstsw", 2}},
+    {{"fiadd", 2}, {"fimul", 2}, {"ficom", 2}, {"ficomp", 2}, {"fisub", 2}, {"fisubr", 2}, {"fidiv", 2}, {"fidivr", 2}},
+    {{"fild", 2}, {"fisttp", 2}, {"fist", 2}, {"fistp", 2}, {"fbld", 10}, {"fild", 8}, {"fbstp", 10}, {"fistp", 8}},
+};
+
+static const char *const x87_d9[64] = {
+    [0x10] = "fnop",
+    [0x20] = "fchs", [0x21] = "fabs", [0x24] = "ftst", [0x25] = "fxam",
+    [0x28] = "fld1", [0x29] = "fldl2t", [0x2A] = "fldl2e", [0x2B] = "fldpi", [0x2C] = "fldlg2", [0x2D] = "fldln2",
+    [0x2E] = "fldz",
+    [0x30] = "f2xm1", [0x31] = "fyl2x", [0x32] = "fptan", [0x33] = "fpatan", [0x34] = "fxtract", [0x35] = "fprem1",
+    [0x36] = "fdecstp", [0x37] = "fincstp", [0x38] = "fprem", [0x39] = "fyl2xp1", [0x3A] = "fsqrt", [0x3B] = "fsincos",
+    [0x3C] = "frndint", [0x3D] = "fscale", [0x3E] = "fsin", [0x3F] = "fcos",
+};
+
+static void disasm_x87(const Insn *in, Out *o, uint64_t *riptarget, int *has_rip) {
+    int op = in->opcode & 7, reg = (in->modrm >> 3) & 7, i = in->modrm & 7;
+    if (in->mod != 3) {
+        const char *n = x87_mem[op][reg].name;
+        if (!n) { put(o, "(bad)"); return; }
+        put(o, "%s ", n);
+        put_mem(o, in, x87_mem[op][reg].size, riptarget);
+        *has_rip = in->base == REG_RIP;
+        return;
+    }
+    uint8_t m = in->modrm;
+    switch (op) {
+    case 0:
+        put(o, "%s st, st(%d)", x87_arith[reg], i);
+        return;
+    case 1:
+        if (reg == 0) { put(o, "fld st(%d)", i); return; }
+        if (reg == 1) { put(o, "fxch st(%d)", i); return; }
+        if (reg == 3) { put(o, "fstp1 st(%d)", i); return; }
+        if (x87_d9[m & 0x3F]) { put(o, "%s", x87_d9[m & 0x3F]); return; }
+        break;
+    case 2: {
+        static const char *const fcmov[4] = {"fcmovb", "fcmove", "fcmovbe", "fcmovu"};
+        if (reg < 4) { put(o, "%s st, st(%d)", fcmov[reg], i); return; }
+        if (m == 0xE9) { put(o, "fucompp"); return; }
+        break;
+    }
+    case 3: {
+        static const char *const fcmov[4] = {"fcmovnb", "fcmovne", "fcmovnbe", "fcmovnu"};
+        if (reg < 4) { put(o, "%s st, st(%d)", fcmov[reg], i); return; }
+        if (m == 0xE2) { put(o, "fnclex"); return; }
+        if (m == 0xE3) { put(o, "fninit"); return; }
+        if (reg == 5) { put(o, "fucomi st, st(%d)", i); return; }
+        if (reg == 6) { put(o, "fcomi st, st(%d)", i); return; }
+        break;
+    }
+    case 4: {
+        static const char *const n[8] = {"fadd", "fmul", "fcom2", "fcomp3", "fsubr", "fsub", "fdivr", "fdiv"};
+        put(o, "%s st(%d), st", n[reg], i);
+        return;
+    }
+    case 5: {
+        static const char *const n[8] = {"ffree", "fxch4", "fst", "fstp", "fucom", "fucomp", 0, 0};
+        if (n[reg]) { put(o, "%s st(%d)", n[reg], i); return; }
+        break;
+    }
+    case 6: {
+        static const char *const n[8] = {"faddp", "fmulp", "fcomp5", 0, "fsubrp", "fsubp", "fdivrp", "fdivp"};
+        if (m == 0xD9) { put(o, "fcompp"); return; }
+        if (n[reg]) { put(o, "%s st(%d), st", n[reg], i); return; }
+        break;
+    }
+    case 7:
+        if (m == 0xE0) { put(o, "fnstsw ax"); return; }
+        if (reg == 0) { put(o, "ffreep st(%d)", i); return; }
+        if (reg == 5) { put(o, "fucomip st, st(%d)", i); return; }
+        if (reg == 6) { put(o, "fcomip st, st(%d)", i); return; }
+        if (reg == 1) { put(o, "fxch7 st(%d)", i); return; }
+        if (reg == 2 || reg == 3) { put(o, "fstp%d st(%d)", reg == 2 ? 8 : 9, i); return; }
+        break;
+    }
+    (void)x87_iarith;
+    put(o, "(bad)");
 }
 
 void disasm(const Insn *in, char *outbuf, size_t n, SymFn symfn, void *ctx) {
@@ -141,10 +240,11 @@ void disasm(const Insn *in, char *outbuf, size_t n, SymFn symfn, void *ctx) {
     case I_IRET: mn = in->opsize == 8 ? "iretq" : in->opsize == 4 ? "iretd" : "iret"; break;
     case I_JRCXZ: mn = in->addrsize == 8 ? "jrcxz" : in->addrsize == 4 ? "jecxz" : "jcxz"; break;
     case I_MOVD: if (in->rex & 8) mn = "movq"; break;
+    case I_PEXTRD: if (in->rex & 8) mn = "pextrq"; break;
+    case I_PINSRD: if (in->rex & 8) mn = "pinsrq"; break;
     case I_MOVLPS: if (in->mod == 3) mn = "movhlps"; break;
     case I_MOVHPS: if (in->mod == 3) mn = "movlhps"; break;
     case I_CMPXCHG8B: if (in->rex & 8) mn = "cmpxchg16b"; break;
-    case I_GRP6: mn = grp6_names[in->reg & 7]; break;
     case I_GRP7R: mn = grp7r_name(in->modrm); show_operands = 0; break;
     case I_NOP:
         if (in->map == 1 && in->opcode == 0x1E && in->rep == 0xF3 && (in->modrm == 0xFA || in->modrm == 0xFB)) {
@@ -152,7 +252,17 @@ void disasm(const Insn *in, char *outbuf, size_t n, SymFn symfn, void *ctx) {
             show_operands = 0;
         }
         break;
-    case I_X87: case I_VEX: case I_EVEX:
+    case I_X87: {
+        uint64_t rt = 0;
+        int hr = 0;
+        disasm_x87(in, &o, &rt, &hr);
+        if (hr) {
+            put(&o, "    # 0x%llx", (unsigned long long)rt);
+            put_sym(&o, rt, symfn, ctx);
+        }
+        return;
+    }
+    case I_VEX: case I_EVEX:
         show_operands = 0;
         break;
     case I_MOVS: case I_STOS: case I_LODS: case I_CMPS: case I_SCAS: case I_INS: case I_OUTS: {
@@ -217,8 +327,17 @@ void disasm(const Insn *in, char *outbuf, size_t n, SymFn symfn, void *ctx) {
             break;
         case O_Vx: put(&o, "%s", xmm[in->reg & 15]); break;
         case O_Ux: put(&o, "%s", xmm[in->rm & 15]); break;
-        case O_Wx: case O_Wq: case O_Wd:
+        case O_Wx: case O_Wq: case O_Wd: case O_Ww:
             if (in->mod == 3) put(&o, "%s", xmm[in->rm & 15]);
+            else { put_mem(&o, in, s, &riptarget); has_rip |= in->base == REG_RIP; }
+            break;
+        case O_Pq: put(&o, "%s", mmx[in->reg & 7]); break;
+        case O_Cd: put(&o, "cr%d", in->reg); break;
+        case O_Dd: put(&o, "dr%d", in->reg & 7); break;
+        case O_Ry: put(&o, "%s", reg_name(in->rm, in->mode == 64 ? 8 : 4, 1)); break;
+        case O_Nq: put(&o, "%s", mmx[in->rm & 7]); break;
+        case O_Qq:
+            if (in->mod == 3) put(&o, "%s", mmx[in->rm & 7]);
             else { put_mem(&o, in, s, &riptarget); has_rip |= in->base == REG_RIP; }
             break;
         default:

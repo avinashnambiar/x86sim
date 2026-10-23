@@ -46,6 +46,7 @@
       <section class="panel regs-panel">
         <div class="panel-head">
           <h2>Registers</h2>
+          <div id="cpu-select" class="cpu-select hidden" role="tablist" aria-label="CPU shown"></div>
           <div class="head-tools">
             <button id="btn-xmm" class="toggle" title="Show XMM registers">XMM</button>
           </div>
@@ -53,6 +54,7 @@
         <div id="regs" class="regs"></div>
         <div id="flags" class="flags"></div>
         <div id="segs" class="segs"></div>
+        <div id="sysregs" class="segs sysregs hidden"></div>
         <div id="xmm" class="xmm hidden"></div>
       </section>
 
@@ -76,11 +78,18 @@
 
     <section class="panel bottom-panel">
       <div class="tabs" role="tablist">
+        <button class="tab hidden" data-tab="screen" role="tab" id="tab-btn-screen">Screen</button>
         <button class="tab active" data-tab="console" role="tab">Console</button>
         <button class="tab" data-tab="syscalls" role="tab">System calls <span id="sys-count" class="count"></span></button>
         <button class="tab" data-tab="trace" role="tab">Trace</button>
         <button class="tab" data-tab="maps" role="tab">Memory map</button>
+        <button class="tab hidden" data-tab="cache" role="tab" id="tab-btn-cache">Caches</button>
         <button class="tab" data-tab="symbols" role="tab">Symbols</button>
+      </div>
+      <div class="tab-body scroll hidden screen-body" id="tab-screen">
+        <pre id="screen" class="screen" tabindex="0" aria-label="PC screen: click and type to send keys"></pre>
+        <canvas id="screen-gfx" class="screen-gfx hidden" width="320" height="200"></canvas>
+        <div class="screen-hint muted">Click the screen and type: keys go to the PC keyboard and serial port.</div>
       </div>
       <div class="tab-body scroll" id="tab-console">
         <pre id="console" class="console"></pre>
@@ -92,6 +101,23 @@
       <div class="tab-body scroll hidden" id="tab-syscalls"><div id="syscalls" class="list"></div></div>
       <div class="tab-body scroll hidden" id="tab-trace"><div id="trace" class="list"></div></div>
       <div class="tab-body scroll hidden" id="tab-maps"><div id="maps" class="list"></div></div>
+      <div class="tab-body scroll hidden" id="tab-cache">
+        <div class="cache-grid">
+          <div>
+            <table class="cache-table" id="cache-table"></table>
+            <div id="cache-bus" class="cache-bus"></div>
+          </div>
+          <div class="cache-side">
+            <form id="line-form" class="line-form">
+              <label for="line-addr">Line at physical address</label>
+              <input id="line-addr" placeholder="e.g. 200000" spellcheck="false" autocomplete="off">
+            </form>
+            <div id="line-view" class="line-view muted">Enter an address to see which caches hold its line and in what MESI state.</div>
+          </div>
+        </div>
+        <h3 class="cache-h">Coherence events <span id="cache-events" class="count"></span></h3>
+        <div id="cache-log" class="list"></div>
+      </div>
       <div class="tab-body scroll hidden" id="tab-symbols">
         <input id="sym-filter" class="filter" placeholder="filter symbols" spellcheck="false">
         <div id="symbols" class="list"></div>

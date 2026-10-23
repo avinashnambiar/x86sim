@@ -495,9 +495,9 @@ static int sec_class(const Shdr *h) {
 static int link_objects(Machine *m, Elf *objs, int n, char *err, size_t errn) {
     Linker L = {.m = m, .objs = objs, .nobjs = n, .err = err, .errn = errn};
     int bits = m->bits_override ? m->bits_override : (objs[0].is64 ? 64 : 32);
-    int real = bits == 16;
-    L.base = real ? 0x100 : bits == 64 ? 0x400000 : 0x08048000;
-    uint64_t seg_base = real ? 0x10000 : 0; /* load segment 0x1000 in real mode */
+    int pc = m->pc_mode, real = bits == 16 || pc;
+    L.base = pc ? 0x7C00 : real ? 0x100 : bits == 64 ? 0x400000 : 0x08048000;
+    uint64_t seg_base = pc ? 0 : real ? 0x10000 : 0; /* load segment 0x1000 in real mode */
 
     for (int i = 0; i < n; i++) {
         if (objs[i].is64 != objs[0].is64) {
@@ -658,7 +658,9 @@ static int link_objects(Machine *m, Elf *objs, int n, char *err, size_t errn) {
     }
 
     /* Map memory */
-    if (real) {
+    if (pc) {
+        mem_poke(m->mem, L.base, L.img, L.img_size);
+    } else if (real) {
         mem_map(m->mem, 0, 0x110000, MEM_R | MEM_W | MEM_X, "conventional memory");
         mem_poke(m->mem, seg_base + L.base, L.img, L.img_size);
     } else {
@@ -712,6 +714,46 @@ static void setup_dos(Machine *m) {
     uint16_t zero = 0;
     mem_poke(m->mem, psp + 0xFFFE, &zero, 2);
     m->cpu.rip = m->entry;
+}
+
+/* ---- PC mode: boot image (flat binary at 0x7C00) or .o files linked there ---- */
+
+int pc_load_image(Machine *m, char *err, size_t errn) {
+    if (m->nfiles == 0) return 0;
+    Elf *objs = calloc(m->nfiles, sizeof *objs);
+    int rc = -1;
+    for (int i = 0; i < m->nfiles; i++) {
+        objs[i].path = m->files[i];
+        if (read_file(m->files[i], &objs[i].data, &objs[i].size, err, errn)) goto out;
+    }
+    if (!is_elf(objs[0].data, objs[0].size)) {
+        if (m->nfiles > 1) {
+            snprintf(err, errn, "flat binaries cannot be linked with other files");
+            goto out;
+        }
+        mem_poke(m->mem, 0x7C00, objs[0].data, objs[0].size);
+        m->entry = 0x7C00;
+        rc = 0;
+        goto out;
+    }
+    for (int i = 0; i < m->nfiles; i++) {
+        if (parse_elf(&objs[i], err, errn)) goto out;
+        if (objs[i].type != ET_REL) {
+            snprintf(err, errn, "%s: expected a relocatable object (.o) or a flat image", objs[i].path);
+            goto out;
+        }
+    }
+    if (link_objects(m, objs, m->nfiles, err, errn) < 0) goto out;
+    rc = 0;
+out:
+    for (int i = 0; i < m->nfiles; i++) {
+        free(objs[i].data);
+        free(objs[i].sh);
+        free(objs[i].ph);
+        free(objs[i].secaddr);
+    }
+    free(objs);
+    return rc;
 }
 
 /* ---- entry point ---- */

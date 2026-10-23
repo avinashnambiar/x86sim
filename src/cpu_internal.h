@@ -55,7 +55,94 @@ uint64_t ea_linear(CPU *c, const Insn *in);
 uint64_t rd_op(CPU *c, const Insn *in, int k);
 void wr_op(CPU *c, const Insn *in, int k, uint64_t v);
 
+/* memory access kinds (mmu.c / lin_read) */
+enum { ACC_W = 1, ACC_X = 2, ACC_SUPER = 4, ACC_SHSTK = 8, ACC_NOFAULT = 16, ACC_USER = 32 };
+/* event kinds for sys_deliver */
+enum { EV_EXT, EV_EXC, EV_SOFT, EV_SOFTEXC, EV_ICEBP };
+
+/* cpu.c */
+void lin_read(CPU *c, uint64_t a, void *buf, int n, int acc);
+void lin_write(CPU *c, uint64_t a, const void *buf, int n, int acc);
+void cpu_push(CPU *c, uint64_t v, int s);
+uint64_t cpu_pop(CPU *c, int s);
+void cpu_execute(CPU *c, const Insn *in);
+
+/* mmu.c */
+void phys_read(CPU *c, uint64_t pa, void *buf, int n);
+void phys_write(CPU *c, uint64_t pa, const void *buf, int n);
+void phys_fetch(CPU *c, uint64_t pa, void *buf, int n);
+
+/* Decoded-instruction cache (system mode). Writes to a physical page that
+ * holds cached code bump its generation, which invalidates the entries. */
+#define IC_SIZE 32768
+#define IC_PAGES (1u << 20)
+typedef struct ICache {
+    struct { uint64_t pa1; uint32_t gen; uint8_t bits; Insn in; } e[IC_SIZE];
+    uint32_t gen[IC_PAGES];
+    uint8_t code[IC_PAGES];
+} ICache;
+static inline void icache_written(CPU *c, uint64_t pa, size_t n) {
+    ICache *ic = c->icache;
+    if (!ic) return;
+    for (uint64_t p = pa >> 12; p <= (pa + n - 1) >> 12; p++) {
+        uint32_t i = (uint32_t)p & (IC_PAGES - 1);
+        if (ic->code[i]) ic->code[i] = 0, ic->gen[i]++;
+    }
+}
+uint64_t mmu_translate(CPU *c, uint64_t lin, int acc);
+void mmu_read(CPU *c, uint64_t lin, void *buf, int n, int acc);
+void mmu_write(CPU *c, uint64_t lin, const void *buf, int n, int acc);
+size_t mmu_fetch(CPU *c, uint64_t lin, uint8_t *buf, size_t n);
+_Noreturn void mmu_fetch_fault(CPU *c, uint64_t lin);
+void tlb_flush_pcid(CPU *c, uint16_t pcid, int keep_global);
+void tlb_invlpg(CPU *c, uint64_t lin);
+void tlb_invlpg_pcid(CPU *c, uint64_t lin, uint16_t pcid);
+
+/* system.c */
+void cpu_update_mode(CPU *c);
+void load_seg(CPU *c, int seg, uint16_t sel);
+void sys_snapshot(CPU *c);
+void sys_far_transfer(CPU *c, int os, uint16_t sel, uint64_t off, int call);
+void sys_far_ret(CPU *c, int os, uint16_t imm);
+void sys_iret(CPU *c, int os);
+void sys_deliver(CPU *c, int vec, int kind, int has_err, uint64_t err, uint64_t ret);
+void sys_soft_int(CPU *c, int vec, int kind);
+void sys_check_io(CPU *c, uint16_t port, int size);
+void sys_syscall(CPU *c);
+void sys_sysret(CPU *c, int rexw);
+void sys_sysenter(CPU *c);
+void sys_sysexit(CPU *c, int rexw);
+uint64_t sys_rdtsc(CPU *c);
+int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v);
+int sys_wrmsr(CPU *c, uint32_t idx, uint64_t v);
+void sys_write_cr(CPU *c, int n, uint64_t v);
+uint64_t sys_read_cr(CPU *c, int n);
+void sys_write_dr(CPU *c, int n, uint64_t v);
+uint64_t sys_read_dr(CPU *c, int n);
+void sys_data_bp(CPU *c, uint64_t lin, int len, int write);
+StepResult sys_step(CPU *c);
+void exec_system(CPU *c, const Insn *in);   /* sysinsn.c */
+
 /* sse.c */
 void exec_sse(CPU *c, const Insn *in);
+
+/* fpu.c */
+void exec_x87(CPU *c, const Insn *in);
+void exec_fxsave(CPU *c, const Insn *in);  /* FXSAVE/FXRSTOR/XSAVE/XRSTOR/XSAVEOPT */
+void fpu_check_pending(CPU *c);            /* #MF if an unmasked x87 exception is pending */
+void mmx_enter(CPU *c);                    /* any MMX instruction: TOP = 0, all tags valid */
+uint64_t mmx_get(CPU *c, int i);
+void mmx_set(CPU *c, int i, uint64_t v);
+void mmx_emms(CPU *c);
+
+/* cet.c */
+int cet_ss_on(CPU *c);
+int cet_ibt_on(CPU *c);
+uint64_t cet_call_push(CPU *c, uint64_t ret);
+void cet_ret_check(CPU *c, uint64_t ret);
+void cet_indirect_branch(CPU *c, const Insn *in);
+void cet_check_endbr(CPU *c, const Insn *in);
+void cet_transition(CPU *c, int old_cpl, int how);
+void exec_cet(CPU *c, const Insn *in);
 
 #endif

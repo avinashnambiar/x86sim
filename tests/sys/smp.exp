@@ -1,0 +1,6 @@
+bsp apic id 00000000 
+ap started, apic id 00000001 
+counters (lock inc, spinlock) 00000fa0 00000fa0 
+unprotected counter lost updates: yes
+ipis received (apic id + 1) 00000002 00000001 
+bye

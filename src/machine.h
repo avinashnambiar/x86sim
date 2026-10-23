@@ -23,7 +23,7 @@ void buf_append(Buf *b, const void *data, size_t n);
 void buf_printf(Buf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void buf_free(Buf *b);
 
-enum { OS_NONE, OS_LINUX, OS_DOS };
+enum { OS_NONE, OS_LINUX, OS_DOS, OS_PC };
 
 enum MachineState {
     MS_READY,       /* can execute */
@@ -46,14 +46,35 @@ enum StopReason {
 };
 
 #define MAX_BP 64
+#define MAX_CPUS 4
 #define TRACE_LEN 512
 #define SYSLOG_LEN 256
 
+struct PC;
+
 typedef struct Machine {
-    CPU cpu;
+    CPU cpu;            /* the bootstrap processor */
+    CPU *cpus[MAX_CPUS];/* cpus[0] == &cpu; application processors after it (PC mode) */
+    int ncpu;
+    int cur_cpu;        /* CPU executing right now */
+    int view_cpu;       /* CPU shown by the debugger and the web UI */
     Mem *mem;
     int bits;
     int os;
+
+    /* full-system PC mode (--pc) */
+    int pc_mode;
+    uint64_t pc_ram_mb;
+    struct PC *pc;
+    char *pc_hda, *pc_fda;          /* disk images */
+    char *pc_kernel, *pc_initrd, *pc_append; /* Linux boot protocol */
+    int pc_boot;                    /* boot drive: 'a', 'c' or 0 (hard disk, then floppy) */
+    int pc_console;                 /* keystrokes come from the host terminal */
+    int yield_on_idle;              /* web UI: end a run chunk when the guest idles */
+    int pc_smp;                     /* --smp: number of CPUs (1-4) */
+    int pc_cache;                   /* --cache: simulate L1/L2 caches with MESI coherence */
+    struct CacheSys *cache;
+    uint64_t cycles;                /* PC mode: instruction rounds (the virtual clock) */
 
     /* what was loaded, kept for reset */
     int nfiles;
@@ -91,10 +112,15 @@ typedef struct Machine {
     int print_syscalls; /* echo syscall log lines to stderr (--strace) */
 } Machine;
 
+/* The CPU the debugger and the UI look at. */
+static inline CPU *machine_cpu(Machine *m) { return m->cpus[m->view_cpu] ? m->cpus[m->view_cpu] : &m->cpu; }
+
 void machine_init(Machine *m);
 void machine_destroy(Machine *m);
 int machine_load(Machine *m, int nfiles, char **files, int argc, char **argv, int bits, char *err, size_t errn);
 int machine_reset(Machine *m, char *err, size_t errn);
+/* After a Machine struct was copied: point the CPUs and devices at the copy. */
+void machine_rebind(Machine *m);
 
 int machine_step(Machine *m);
 int machine_run(Machine *m, uint64_t max_insns);
@@ -109,6 +135,10 @@ int machine_has_bp(Machine *m, uint64_t addr);
 const Symbol *machine_find_symbol(Machine *m, uint64_t addr);
 int machine_lookup_symbol(Machine *m, const char *name, uint64_t *addr);
 int machine_symname(void *ctx, uint64_t addr, char *buf, size_t n);
+size_t machine_peek(Machine *m, uint64_t lin, void *buf, size_t n);
+/* Physical accesses that stay coherent with the simulated caches. */
+size_t machine_phys_peek(Machine *m, uint64_t pa, void *buf, size_t n);
+size_t machine_phys_poke(Machine *m, uint64_t pa, const void *buf, size_t n);
 int machine_disasm(Machine *m, uint64_t addr, Insn *in, char *text, size_t n);
 int machine_parse_addr(Machine *m, const char *s, uint64_t *addr);
 

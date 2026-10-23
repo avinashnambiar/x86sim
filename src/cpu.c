@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cache.h"
 #include "cpu_internal.h"
 #include "decode.h"
 
@@ -33,6 +34,8 @@ void cpu_init(CPU *c, Mem *m, int bits) {
     c->cpl = bits == 16 ? 0 : 3;
     c->rflags = 0x202;
     c->mxcsr = 0x1F80;
+    c->fpu.fcw = 0x037F;
+    c->xcr0 = 3; /* x87 | SSE */
 }
 
 void cpu_load_seg_real(CPU *c, int seg, uint16_t sel) {
@@ -78,25 +81,69 @@ _Noreturn static void page_fault(CPU *c, uint64_t addr, int write, int fetch) {
 
 static inline uint64_t lin_mask(CPU *c) { return c->bits == 64 ? ~0ULL : 0xFFFFFFFFULL; }
 static inline uint64_t ip_mask(CPU *c) { return c->bits == 64 ? ~0ULL : c->bits == 32 ? 0xFFFFFFFFULL : 0xFFFF; }
-uint64_t linear(CPU *c, int seg, uint64_t off) { return (c->sbase[seg] + off) & lin_mask(c); }
+
+/* In 64-bit mode only FS and GS have bases; non-canonical addresses fault. */
+uint64_t linear(CPU *c, int seg, uint64_t off) {
+    if (c->bits != 64) return (c->sbase[seg] + off) & 0xFFFFFFFFULL;
+    uint64_t a = seg >= FS ? c->sbase[seg] + off : off;
+    if (c->sys) {
+        int sh = (c->cr4 & CR4_LA57) ? 7 : 16;
+        if ((uint64_t)((int64_t)(a << sh) >> sh) != a)
+            raise_exc(c, seg == SS ? EXC_SS : EXC_GP, 0, "non-canonical address");
+    }
+    return a;
+}
+
+/* Linear-address accesses. User-mode emulation reads guest memory directly
+ * (page protection only); full-system mode goes through paging. */
+void lin_read(CPU *c, uint64_t a, void *buf, int n, int acc) {
+    if (!c->sys) {
+        if (mem_read(c->mem, a, buf, (size_t)n)) page_fault(c, mem_fault_addr(c->mem), 0, 0);
+    } else if (c->cr0 & CR0_PG) {
+        mmu_read(c, a, buf, n, acc);
+    } else {
+        phys_read(c, a, buf, n);
+    }
+}
+
+void lin_write(CPU *c, uint64_t a, const void *buf, int n, int acc) {
+    if (!c->sys) {
+        if (mem_write(c->mem, a, buf, (size_t)n)) page_fault(c, mem_fault_addr(c->mem), 1, 0);
+    } else if (c->cr0 & CR0_PG) {
+        mmu_write(c, a, buf, n, acc);
+    } else {
+        phys_write(c, a, buf, n);
+    }
+}
+
+/* Alignment check (#AC) and data breakpoints, for explicit accesses. */
+static inline void sys_access(CPU *c, uint64_t a, int s, int write) {
+    if ((c->cr0 & CR0_AM) && (c->rflags & FL_AC) && c->cpl == 3 && (a & (uint64_t)(s - 1)) && s <= 8)
+        raise_exc(c, EXC_AC, 0, NULL);
+    if (c->dbg_active) sys_data_bp(c, a, s, write);
+}
 
 /* Host is little-endian (x86-64 / arm64), so guest values copy directly. */
 uint64_t rdm(CPU *c, uint64_t a, int s) {
     uint64_t v = 0;
-    if (mem_read(c->mem, a, &v, s)) page_fault(c, mem_fault_addr(c->mem), 0, 0);
+    if (c->sys) sys_access(c, a, s, 0);
+    lin_read(c, a, &v, s, 0);
     return v;
 }
 
 void wrm(CPU *c, uint64_t a, int s, uint64_t v) {
-    if (mem_write(c->mem, a, &v, s)) page_fault(c, mem_fault_addr(c->mem), 1, 0);
+    if (c->sys) sys_access(c, a, s, 1);
+    lin_write(c, a, &v, s, 0);
 }
 
 void rdm128(CPU *c, uint64_t a, void *dst) {
-    if (mem_read(c->mem, a, dst, 16)) page_fault(c, mem_fault_addr(c->mem), 0, 0);
+    if (c->sys && c->dbg_active) sys_data_bp(c, a, 16, 0);
+    lin_read(c, a, dst, 16, 0);
 }
 
 void wrm128(CPU *c, uint64_t a, const void *src) {
-    if (mem_write(c->mem, a, src, 16)) page_fault(c, mem_fault_addr(c->mem), 1, 0);
+    if (c->sys && c->dbg_active) sys_data_bp(c, a, 16, 1);
+    lin_write(c, a, src, 16, 0);
 }
 
 uint64_t ea_offset(CPU *c, const Insn *in) {
@@ -113,11 +160,6 @@ static int ea_seg(const Insn *in) {
 }
 
 uint64_t ea_linear(CPU *c, const Insn *in) { return linear(c, ea_seg(in), ea_offset(c, in)); }
-
-static void load_seg(CPU *c, int seg, uint16_t sel) {
-    if (c->bits == 16) cpu_load_seg_real(c, seg, sel);
-    else c->sreg[seg] = sel; /* descriptor tables arrive with protected-mode support */
-}
 
 uint64_t rd_op(CPU *c, const Insn *in, int k) {
     int spec = in->opnd[k], s = opnd_size(in, spec);
@@ -182,10 +224,12 @@ void wr_op(CPU *c, const Insn *in, int k, uint64_t v) {
         int seg = in->reg & 7;
         if (seg > 5 || seg == CS) raise_exc(c, EXC_UD, 0, NULL);
         load_seg(c, seg, (uint16_t)v);
+        if (seg == SS) c->intr_shadow = 1;
         return;
     }
     case O_ES: case O_CS: case O_SS: case O_DS: case O_FS: case O_GS:
         load_seg(c, spec - O_ES, (uint16_t)v);
+        if (spec == O_SS) c->intr_shadow = 1;
         return;
     }
     unimplemented(c, in);
@@ -193,16 +237,24 @@ void wr_op(CPU *c, const Insn *in, int k, uint64_t v) {
 
 /* ---- stack ---- */
 
-static inline int stack_size(CPU *c) { return c->bits == 64 ? 8 : c->bits == 32 ? 4 : 2; }
+/* Stack address size: SS.B outside 64-bit mode (code size in user mode). */
+static inline int stack_size(CPU *c) {
+    if (c->bits == 64) return 8;
+    if (c->sys) return (c->sattr[SS] & SA_DB) ? 4 : 2;
+    return c->bits == 32 ? 4 : 2;
+}
 
-static void push(CPU *c, uint64_t v, int s) {
+#define push cpu_push
+#define pop cpu_pop
+
+void cpu_push(CPU *c, uint64_t v, int s) {
     int ss = stack_size(c);
     uint64_t sp = ((c->r[RSP] & MASK(ss)) - s) & MASK(ss);
     wrm(c, linear(c, SS, sp), s, v);
     setreg(c, RSP, ss, 1, sp);
 }
 
-static uint64_t pop(CPU *c, int s) {
+uint64_t cpu_pop(CPU *c, int s) {
     int ss = stack_size(c);
     uint64_t sp = c->r[RSP] & MASK(ss);
     uint64_t v = rdm(c, linear(c, SS, sp), s);
@@ -413,7 +465,8 @@ static void string_op(CPU *c, const Insn *in) {
             break;
         default: { /* INS / OUTS */
             uint16_t port = c->r[RDX] & 0xFFFF;
-            if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP I/O instruction in user mode");
+            if (c->sys) sys_check_io(c, port, s);
+            else if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP I/O instruction in user mode");
             uint32_t v = 0xFFFFFFFF;
             if (id == I_INS) {
                 if (c->on_port_in) c->on_port_in(c, port, s, &v);
@@ -441,42 +494,123 @@ static void cpuid(CPU *c) {
     uint32_t leaf = (uint32_t)c->r[RAX], sub = (uint32_t)c->r[RCX];
     uint32_t a = 0, b = 0, cc = 0, d = 0;
     static const char brand[48] = "x86sim Virtual x86-64 CPU";
-    (void)sub;
+    int osxsave = c->sys ? (c->cr4 & CR4_OSXSAVE) != 0 : 1;
+    uint32_t ncpu = c->ncpu > 1 ? (uint32_t)c->ncpu : 1, id = (uint32_t)c->index;
+    uint32_t core_bits = ncpu <= 1 ? 0 : 32 - (uint32_t)__builtin_clz(ncpu - 1); /* APIC ID bits for the cores */
     switch (leaf) {
     case 0:
-        a = 7;
+        a = 0x16;
         memcpy(&b, "Genu", 4);
         memcpy(&d, "ineI", 4);
         memcpy(&cc, "ntel", 4);
         break;
     case 1:
         a = 0x000906EA;            /* family 6 */
-        b = 0x00010800;            /* CLFLUSH line 64 bytes, 1 logical CPU */
-        cc = (1u << 13)            /* CMPXCHG16B */
+        b = 0x00000800             /* CLFLUSH line 64 bytes */
+          | (1u << core_bits) << 16 /* addressable logical processor IDs in the package */
+          | id << 24;              /* initial APIC ID */
+        cc = (1u << 0)             /* SSE3 */
+           | (1u << 1)             /* PCLMULQDQ */
+           | (1u << 9)             /* SSSE3 */
+           | (1u << 13)            /* CMPXCHG16B */
+           | (1u << 17)            /* PCID */
+           | (1u << 19)            /* SSE4.1 */
+           | (1u << 20)            /* SSE4.2 */
+           | (1u << 22)            /* MOVBE */
            | (1u << 23)            /* POPCNT */
-           | (1u << 30);           /* RDRAND */
-        d = (1u << 4)              /* TSC */
+           | (1u << 25)            /* AES */
+           | (1u << 26)            /* XSAVE */
+           | (osxsave ? 1u << 27 : 0) /* OSXSAVE */
+           | (1u << 30)            /* RDRAND */
+           | c->cpuid_1c;          /* machine-dependent: x2APIC, TSC deadline */
+        d = (1u << 0)              /* FPU */
+          | (1u << 2)              /* DE */
+          | (1u << 3)              /* PSE */
+          | (1u << 4)              /* TSC */
+          | (1u << 5)              /* MSR */
+          | (1u << 6)              /* PAE */
           | (1u << 8)              /* CX8 */
+          | (1u << 11)             /* SEP */
+          | (1u << 12)             /* MTRR */
+          | (1u << 13)             /* PGE */
           | (1u << 15)             /* CMOV */
+          | (1u << 16)             /* PAT */
+          | (1u << 17)             /* PSE-36 */
           | (1u << 19)             /* CLFSH */
-          | (1u << 25)             /* SSE (partial) */
-          | (1u << 26);            /* SSE2 (partial) */
+          | (1u << 23)             /* MMX */
+          | (1u << 24)             /* FXSR */
+          | (1u << 25)             /* SSE */
+          | (1u << 26)             /* SSE2 */
+          | (ncpu > 1 ? 1u << 28 : 0) /* HTT: several logical processors per package */
+          | c->cpuid_1d;           /* machine-dependent: APIC */
         break;
     case 7:
-        if (sub == 0) b = 1u << 18; /* RDSEED */
+        if (sub == 0) {
+            b = (1u << 0)          /* FSGSBASE */
+              | (1u << 1)          /* TSC_ADJUST */
+              | (1u << 7)          /* SMEP */
+              | (1u << 9)          /* ERMS */
+              | (1u << 10)         /* INVPCID */
+              | (1u << 18)         /* RDSEED */
+              | (1u << 19)         /* ADX */
+              | (1u << 20)         /* SMAP */
+              | (1u << 29);        /* SHA */
+            cc = (1u << 2)         /* UMIP */
+               | (1u << 3)         /* PKU */
+               | (1u << 7)         /* CET shadow stacks */
+               | ((c->sys && (c->cr4 & CR4_PKE)) ? 1u << 4 : 0) /* OSPKE */
+               | (1u << 16)        /* LA57 */
+               | (1u << 22);       /* RDPID */
+            d = 1u << 20;          /* CET indirect branch tracking */
+        }
+        break;
+    case 4: { /* deterministic cache parameters: 48K L1D, 32K L1I per core; 3M L2 shared */
+        static const struct { uint32_t type, level, ways, sets, shared; } cp[3] = {
+            {1, 1, 12, 64, 0}, {2, 1, 8, 64, 0}, {3, 2, 12, 4096, 1}};
+        if (sub < 3) {
+            a = cp[sub].type | cp[sub].level << 5 | 1u << 8 /* self-initializing */
+              | (cp[sub].shared ? ((1u << core_bits) - 1) : 0) << 14 /* logical processors sharing it - 1 */
+              | ((1u << core_bits) - 1) << 26;                         /* cores in the package - 1 */
+            b = (cp[sub].ways - 1) << 22 | 63; /* ways, one partition, 64-byte lines */
+            cc = cp[sub].sets - 1;
+            d = cp[sub].level == 2 ? 1u << 1 : 0; /* L2 inclusive of the lower levels */
+        }
+        break;
+    }
+    case 0xB: /* extended topology: one thread per core, ncpu cores */
+        if (sub == 0) { a = 0; b = 1; cc = 1u << 8; }
+        else if (sub == 1) { a = core_bits; b = ncpu; cc = 1 | 2u << 8; }
+        else cc = sub & 0xFF;
+        d = id;
+        break;
+    case 0xD: /* XSAVE: x87 and SSE state components */
+        if (sub == 0) { a = 3; b = 576; cc = 576; }
+        else if (sub == 1) a = 1; /* XSAVEOPT */
+        break;
+    case 0x15: /* TSC / crystal: a 1 GHz crystal, TSC = crystal */
+        a = 1; b = 1; cc = 1000000000;
+        break;
+    case 0x16: /* base / max / bus frequency in MHz */
+        a = 1000; b = 1000; cc = 1000;
         break;
     case 0x80000000:
-        a = 0x80000004;
+        a = 0x80000008;
         break;
     case 0x80000001:
-        cc = (1u << 0) | (1u << 5); /* LAHF/SAHF in 64-bit, LZCNT */
-        d = (1u << 11) | (1u << 20) | (1u << 29); /* SYSCALL, NX, long mode */
+        cc = (1u << 0) | (1u << 5) | (1u << 8); /* LAHF/SAHF in 64-bit, LZCNT, PREFETCHW */
+        d = (1u << 11) | (1u << 20) | (1u << 26) | (1u << 27) | (1u << 29); /* SYSCALL, NX, 1G pages, RDTSCP, LM */
         break;
     case 0x80000002: case 0x80000003: case 0x80000004: {
         const uint32_t *p = (const uint32_t *)(brand + (leaf - 0x80000002) * 16);
         a = p[0]; b = p[1]; cc = p[2]; d = p[3];
         break;
     }
+    case 0x80000007:
+        d = 1u << 8; /* invariant TSC */
+        break;
+    case 0x80000008:
+        a = 39 | (57 << 8); /* physical / linear address bits */
+        break;
     }
     c->r[RAX] = a;
     c->r[RBX] = b;
@@ -515,6 +649,20 @@ static uint64_t next_random(void) {
     rng_state ^= rng_state >> 7;
     rng_state ^= rng_state << 17;
     return rng_state;
+}
+
+/* System-mode availability of MMX/SSE state (CR0.EM/TS, CR4.OSFXSR). */
+static void sse_check(CPU *c, const Insn *in) {
+    if (!c->sys) return;
+    int mmx = in->id == I_EMMS;
+    for (int i = 0; i < 3; i++)
+        if (in->opnd[i] == O_Pq || in->opnd[i] == O_Qq || in->opnd[i] == O_Nq) mmx = 1;
+    if (in->opnd[0] == O_Vx || in->opnd[1] == O_Vx || in->opnd[0] == O_Wx || in->opnd[0] == O_Wq ||
+        in->opnd[0] == O_Wd)
+        mmx = 0; /* conversions between xmm and mm are SSE instructions */
+    if (c->cr0 & CR0_EM) raise_exc(c, EXC_UD, 0, NULL);
+    if (!mmx && !(c->cr4 & CR4_OSFXSR)) raise_exc(c, EXC_UD, 0, NULL);
+    if (c->cr0 & CR0_TS) raise_exc(c, EXC_NM, 0, NULL);
 }
 
 /* ---- the instruction dispatcher ---- */
@@ -727,8 +875,13 @@ static void execute(CPU *c, const Insn *in) {
         else push(c, a, s);
         break;
     case I_POP:
-        if (in->opnd[0] >= O_ES && in->opnd[0] <= O_GS) wr_op(c, in, 0, pop(c, os));
-        else wr_op(c, in, 0, pop(c, s));
+        if (in->opnd[0] >= O_ES && in->opnd[0] <= O_GS) {
+            if (c->sys) sys_snapshot(c); /* a faulting segment load must not move RSP */
+            wr_op(c, in, 0, pop(c, os));
+            c->snap_valid = 0;
+        } else {
+            wr_op(c, in, 0, pop(c, s));
+        }
         break;
     case I_PUSHA: {
         uint64_t sp = getreg(c, RSP, os, 1);
@@ -742,12 +895,26 @@ static void execute(CPU *c, const Insn *in) {
         }
         break;
     case I_PUSHF:
+        if (c->sys && (c->rflags & FL_VM) && ((c->rflags >> 12) & 3) < 3) raise_exc(c, EXC_GP, 0, NULL);
         push(c, c->rflags & 0x00FCFFFF & MASK(os), os);
         break;
     case I_POPF: {
-        uint64_t v = pop(c, os);
         uint64_t mask = FL_ARITH | FL_TF | FL_DF | FL_AC | FL_ID;
-        if (c->cpl == 0) mask |= FL_IF | 0x3000;
+        if (c->sys) {
+            int pl = (int)((c->rflags >> 12) & 3);
+            mask |= FL_NT;
+            if (!(c->cr0 & CR0_PE)) mask |= FL_IF | FL_IOPL;
+            else if (c->rflags & FL_VM) {
+                if (pl < 3) raise_exc(c, EXC_GP, 0, NULL);
+                mask |= FL_IF;
+            } else {
+                if (c->cpl == 0) mask |= FL_IOPL;
+                if (c->cpl <= pl) mask |= FL_IF;
+            }
+        } else if (c->cpl == 0) {
+            mask |= FL_IF | 0x3000;
+        }
+        uint64_t v = pop(c, os);
         if (os == 2) mask &= 0xFFFF;
         c->rflags = ((c->rflags & ~mask) | (v & mask)) | 2;
         break;
@@ -776,17 +943,27 @@ static void execute(CPU *c, const Insn *in) {
 
     case I_JMP:
         c->next_rip = rd_op(c, in, 0) & MASK(os) & ip_mask(c);
+        if (in->opnd[0] != O_Jb && in->opnd[0] != O_Jz) cet_indirect_branch(c, in);
         break;
     case I_JCC:
         if (cond(c, in->cc)) c->next_rip = in->target;
         break;
     case I_CALL:
         a = rd_op(c, in, 0) & MASK(os) & ip_mask(c);
-        push(c, c->next_rip, os);
+        if (cet_ss_on(c) && !(in->opnd[0] == O_Jz && in->target == c->next_rip)) { /* CALL +0 is exempt */
+            uint64_t nssp = cet_call_push(c, c->next_rip);
+            push(c, c->next_rip, os);
+            c->ssp = nssp;
+        } else push(c, c->next_rip, os);
+        if (in->opnd[0] != O_Jz) cet_indirect_branch(c, in);
         c->next_rip = a;
         break;
     case I_RET:
-        a = pop(c, os);
+        if (cet_ss_on(c)) {
+            sys_snapshot(c);
+            a = pop(c, os);
+            cet_ret_check(c, a & ip_mask(c));
+        } else a = pop(c, os);
         if (in->opnd[0] == O_Iw) {
             int ss = stack_size(c);
             setreg(c, RSP, ss, 1, getreg(c, RSP, ss, 1) + (in->imm & 0xFFFF));
@@ -815,7 +992,7 @@ static void execute(CPU *c, const Insn *in) {
         break;
 
     case I_JMPF: case I_CALLF: {
-        if (c->bits != 16) unimplemented(c, in);
+        if (c->bits != 16 && !c->sys) unimplemented(c, in);
         uint64_t off;
         uint16_t sel;
         if (in->opnd[0] == O_Ap) {
@@ -826,6 +1003,10 @@ static void execute(CPU *c, const Insn *in) {
             off = rdm(c, ad, os);
             sel = (uint16_t)rdm(c, ad + os, 2);
         }
+        if (c->sys) {
+            sys_far_transfer(c, os, sel, off, in->id == I_CALLF);
+            break;
+        }
         if (in->id == I_CALLF) {
             push(c, c->sreg[CS], os);
             push(c, c->next_rip, os);
@@ -835,6 +1016,10 @@ static void execute(CPU *c, const Insn *in) {
         break;
     }
     case I_RETF: {
+        if (c->sys) {
+            sys_far_ret(c, os, in->opnd[0] == O_Iw ? (uint16_t)in->imm : 0);
+            break;
+        }
         if (c->bits != 16) unimplemented(c, in);
         uint64_t off = pop(c, os);
         uint16_t sel = (uint16_t)pop(c, os);
@@ -844,6 +1029,10 @@ static void execute(CPU *c, const Insn *in) {
         break;
     }
     case I_IRET: {
+        if (c->sys) {
+            sys_iret(c, os);
+            break;
+        }
         if (c->bits != 16) unimplemented(c, in);
         uint64_t off = pop(c, os);
         uint16_t sel = (uint16_t)pop(c, os);
@@ -917,6 +1106,23 @@ static void execute(CPU *c, const Insn *in) {
         set_flags(c, FL_ARITH, a == 0 ? FL_ZF : 0);
         wr_op(c, in, 0, r);
         break;
+    case I_CRC32: {
+        int n = opnd_size(in, in->opnd[1]);
+        uint32_t crc = (uint32_t)c->r[in->reg];
+        a = rd_op(c, in, 1);
+        for (int i = 0; i < n * 8; i++) {
+            crc ^= (uint32_t)(a >> i) & 1;
+            crc = (crc >> 1) ^ ((crc & 1) ? 0x82F63B78u : 0);
+        }
+        setreg(c, in->reg, opnd_size(in, in->opnd[0]), 1, crc);
+        break;
+    }
+    case I_MOVBE:
+        if (in->mod == 3) raise_exc(c, EXC_UD, 0, NULL);
+        a = rd_op(c, in, 1);
+        r = s == 2 ? __builtin_bswap16((uint16_t)a) : s == 4 ? __builtin_bswap32((uint32_t)a) : __builtin_bswap64(a);
+        wr_op(c, in, 0, r);
+        break;
 
     case I_MOVS: case I_STOS: case I_LODS: case I_CMPS: case I_SCAS: case I_INS: case I_OUTS:
         string_op(c, in);
@@ -928,9 +1134,17 @@ static void execute(CPU *c, const Insn *in) {
     case I_CLD: c->rflags &= ~FL_DF; break;
     case I_STD: c->rflags |= FL_DF; break;
     case I_CLI: case I_STI:
-        if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP cli/sti in user mode");
+        if (c->sys) {
+            int pl = (int)((c->rflags >> 12) & 3);
+            if ((c->cr0 & CR0_PE) && ((c->rflags & FL_VM) ? pl < 3 : c->cpl > pl)) raise_exc(c, EXC_GP, 0, NULL);
+        } else if (c->cpl > 0) {
+            raise_exc(c, EXC_GP, 0, "#GP cli/sti in user mode");
+        }
         if (in->id == I_CLI) c->rflags &= ~FL_IF;
-        else c->rflags |= FL_IF;
+        else {
+            if (!(c->rflags & FL_IF)) c->intr_shadow = 1;
+            c->rflags |= FL_IF;
+        }
         break;
     case I_LAHF:
         setreg(c, RSP, 1, 0, (c->rflags & 0xD5) | 2); /* AH is register 4 without REX */
@@ -939,23 +1153,78 @@ static void execute(CPU *c, const Insn *in) {
         c->rflags = (c->rflags & ~0xD5ULL) | (getreg(c, RSP, 1, 0) & 0xD5) | 2;
         break;
 
-    case I_NOP: case I_PAUSE: case I_PREFETCH: case I_FWAIT:
-    case I_LFENCE: case I_MFENCE: case I_SFENCE: case I_CLFLUSH:
+    case I_FWAIT:
+        if (c->sys && (c->cr0 & CR0_TS) && (c->cr0 & CR0_MP)) raise_exc(c, EXC_NM, 0, NULL);
+        fpu_check_pending(c);
+        break;
+    case I_X87:
+        if (c->sys && (c->cr0 & (CR0_EM | CR0_TS))) raise_exc(c, EXC_NM, 0, NULL);
+        exec_x87(c, in);
+        break;
+    case I_FXSAVE: case I_FXRSTOR: case I_XSAVE: case I_XRSTOR: case I_XSAVEOPT:
+        if (c->sys) {
+            if (in->id >= I_XSAVE && !(c->cr4 & CR4_OSXSAVE)) raise_exc(c, EXC_UD, 0, NULL);
+            if (c->cr0 & (CR0_EM | CR0_TS)) raise_exc(c, (c->cr0 & CR0_EM) && in->id >= I_XSAVE ? EXC_UD : EXC_NM, 0, NULL);
+        }
+        exec_fxsave(c, in);
+        break;
+    case I_ENDBR64: case I_ENDBR32: case I_RDSSP: case I_INCSSP: case I_RSTORSSP: case I_SAVEPREVSSP:
+    case I_SETSSBSY: case I_CLRSSBSY: case I_WRSS: case I_WRUSS:
+        if (!c->sys) {
+            if (in->id == I_WRSS || in->id == I_WRUSS || in->id == I_RSTORSSP || in->id == I_SAVEPREVSSP ||
+                in->id == I_SETSSBSY || in->id == I_CLRSSBSY || in->id == I_INCSSP)
+                raise_exc(c, EXC_UD, 0, NULL); /* shadow stacks are off in user-mode emulation */
+            break;
+        }
+        exec_cet(c, in);
+        break;
+    case I_ADCX: case I_ADOX: { /* add with carry through CF or OF only */
+        uint64_t fl = in->id == I_ADCX ? FL_CF : FL_OF;
+        int sz = in->opsize == 8 ? 8 : 4;
+        uint64_t x = getreg(c, in->reg, sz, 1), y = rd_op(c, in, 1) & MASK(sz), cin = (c->rflags & fl) != 0;
+        uint64_t r = (x + y + cin) & MASK(sz);
+        int cout = sz == 8 ? (r < x || (cin && r == x)) : ((x + y + cin) >> 32) != 0;
+        setreg(c, in->reg, sz, 1, r);
+        c->rflags = cout ? c->rflags | fl : c->rflags & ~fl;
+        break;
+    }
+    case I_NOP: case I_PAUSE: case I_PREFETCH:
+    case I_LFENCE: case I_MFENCE: case I_SFENCE:
+        break;
+    case I_CLFLUSH: /* CLFLUSH / CLFLUSHOPT: write the line back and drop it from every cache */
+        if (c->cache) {
+            uint64_t lin = ea_linear(c, in);
+            uint64_t pa = (c->cr0 & CR0_PG) ? mmu_translate(c, lin, 0) : lin;
+            cache_flush_line(c->cache, pa & c->a20_mask, 1);
+        }
         break;
     case I_HLT:
         if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP hlt in user mode");
+        if (c->sys) {
+            c->halted = 1;
+            break;
+        }
         raise_trap(c, -1, "CPU halted");
     case I_INT3:
+        if (c->sys) { sys_soft_int(c, EXC_BP, EV_SOFTEXC); break; }
         raise_trap(c, EXC_BP, "breakpoint (int3)");
     case I_INT1:
+        if (c->sys) { sys_soft_int(c, EXC_DB, EV_ICEBP); break; }
         raise_trap(c, EXC_DB, "int1");
     case I_INTO:
-        if (c->rflags & FL_OF) raise_trap(c, EXC_OF, NULL);
-        break;
+        if (!(c->rflags & FL_OF)) break;
+        if (c->sys) { sys_soft_int(c, EXC_OF, EV_SOFTEXC); break; }
+        raise_trap(c, EXC_OF, NULL);
     case I_INT:
+        if (c->sys) { sys_soft_int(c, (int)(in->imm & 0xFF), EV_SOFT); break; }
         do_interrupt(c, (int)(in->imm & 0xFF));
         break;
+    case I_SYSENTER:
+        if (!c->sys) unimplemented(c, in);
+        sys_sysenter(c);
+        break;
     case I_SYSCALL:
+        if (c->sys) { sys_syscall(c); break; }
         if (c->bits != 64) raise_exc(c, EXC_UD, 0, NULL);
         c->r[RCX] = c->next_rip;
         c->r[R11] = c->rflags;
@@ -964,12 +1233,18 @@ static void execute(CPU *c, const Insn *in) {
     case I_CPUID:
         cpuid(c);
         break;
-    case I_RDTSC:
-        /* Deterministic time stamp: the instruction count. */
-        setreg(c, RAX, 4, 1, c->icount);
-        setreg(c, RDX, 4, 1, c->icount >> 32);
+    case I_RDTSC: {
+        /* Deterministic time stamp: the instruction count (or the machine's clock). */
+        uint64_t t = c->sys ? sys_rdtsc(c) : c->icount;
+        setreg(c, RAX, 4, 1, t);
+        setreg(c, RDX, 4, 1, t >> 32);
         break;
+    }
     case I_RDRAND: case I_RDSEED:
+        if (in->id == I_RDSEED && in->rep == 0xF3) { /* RDPID */
+            setreg(c, in->rm, c->bits == 64 ? 8 : 4, 1, c->msr.tsc_aux);
+            break;
+        }
         wr_op(c, in, 0, next_random());
         set_flags(c, FL_ARITH, FL_CF);
         break;
@@ -981,9 +1256,10 @@ static void execute(CPU *c, const Insn *in) {
         break;
     }
     case I_IN: case I_OUT: {
-        if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP I/O instruction in user mode");
         int sz = in->id == I_IN ? s : opnd_size(in, in->opnd[1]);
         uint16_t port = (uint16_t)(in->id == I_IN ? rd_op(c, in, 1) : rd_op(c, in, 0));
+        if (c->sys) sys_check_io(c, port, sz);
+        else if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP I/O instruction in user mode");
         if (in->id == I_IN) {
             uint32_t v = 0xFFFFFFFF;
             if (c->on_port_in) c->on_port_in(c, port, sz, &v);
@@ -1041,10 +1317,11 @@ static void execute(CPU *c, const Insn *in) {
         break;
 
     case I_GRP7R:
+        if (c->sys) { exec_system(c, in); break; }
         if (in->modrm == 0xD0) { /* xgetbv */
             if ((c->r[RCX] & 0xFFFFFFFF) != 0) raise_exc(c, EXC_GP, 0, NULL);
-            setreg(c, RAX, 4, 1, 3); /* x87 + SSE state */
-            setreg(c, RDX, 4, 1, 0);
+            setreg(c, RAX, 4, 1, c->xcr0);
+            setreg(c, RDX, 4, 1, c->xcr0 >> 32);
             break;
         }
         if (in->modrm == 0xF9) { /* rdtscp */
@@ -1055,16 +1332,22 @@ static void execute(CPU *c, const Insn *in) {
         }
         if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP privileged instruction");
         unimplemented(c, in);
-    case I_SGDT: case I_SIDT: case I_LGDT: case I_LIDT: case I_LMSW: case I_INVLPG: case I_GRP6:
-        if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP privileged instruction");
-        unimplemented(c, in);
+    case I_SGDT: case I_SIDT: case I_LGDT: case I_LIDT: case I_SMSW: case I_LMSW: case I_INVLPG:
+    case I_SLDT: case I_STR: case I_LLDT: case I_LTR: case I_VERR: case I_VERW: case I_LAR: case I_LSL:
+    case I_CLTS: case I_SYSRET: case I_SYSEXIT: case I_INVD: case I_WBINVD: case I_MOVCR: case I_MOVDR:
+    case I_WRMSR: case I_RDMSR: case I_RDPMC: case I_RSM: case I_UD0: case I_UD1: case I_INVPCID:
+    case I_RDFSBASE: case I_RDGSBASE: case I_WRFSBASE: case I_WRGSBASE:
+        exec_system(c, in);
+        break;
 
     case I_LDMXCSR:
+        sse_check(c, in);
         a = rd_op(c, in, 0);
         if (a & 0xFFFF0000) raise_exc(c, EXC_GP, 0, NULL);
         c->mxcsr = (uint32_t)a;
         break;
     case I_STMXCSR:
+        sse_check(c, in);
         wr_op(c, in, 0, c->mxcsr);
         break;
 
@@ -1074,6 +1357,7 @@ static void execute(CPU *c, const Insn *in) {
 
     default:
         if (in->id >= I_MOVUPS && in->id < I_MOVNTI) {
+            sse_check(c, in);
             exec_sse(c, in);
             break;
         }
@@ -1081,10 +1365,13 @@ static void execute(CPU *c, const Insn *in) {
     }
 }
 
+void cpu_execute(CPU *c, const Insn *in) { execute(c, in); }
+
 StepResult cpu_step(CPU *c) {
     Insn in;
     uint8_t buf[15];
     c->stop_request = 0;
+    if (c->sys) return sys_step(c);
     if (_setjmp(c->jb)) return STEP_EXCEPTION;
 
     uint64_t pc = linear(c, CS, c->rip);
