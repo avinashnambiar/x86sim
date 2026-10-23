@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>x86sim Debugger</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">x86<b>sim</b></span>
+      <span id="program" class="program" title="Loaded program"></span>
+      <span id="mode" class="badge"></span>
+    </div>
+    <div class="toolbar" role="toolbar" aria-label="Execution controls">
+      <button id="btn-step" title="Step into (F11 or S)"><span class="ico">&#8628;</span>Step</button>
+      <button id="btn-next" title="Step over (F10 or N)"><span class="ico">&#8631;</span>Over</button>
+      <button id="btn-finish" title="Step out (Shift+F11 or F)"><span class="ico">&#8625;</span>Out</button>
+      <button id="btn-continue" class="primary" title="Continue (F5 or C)"><span class="ico">&#9654;</span>Run</button>
+      <button id="btn-pause" title="Pause (F6)" disabled><span class="ico">&#10073;&#10073;</span>Pause</button>
+      <button id="btn-reset" title="Reset (Ctrl+R)"><span class="ico">&#8635;</span>Reset</button>
+      <button id="btn-load" title="Load another program"><span class="ico">&#128194;</span>Load</button>
+    </div>
+    <div class="status">
+      <span id="state" class="pill">—</span>
+      <span id="status-text" class="status-text"></span>
+      <span class="icount"><span id="icount">0</span> insns</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel disasm-panel">
+      <div class="panel-head">
+        <h2>Disassembly</h2>
+        <span id="where" class="where"></span>
+        <div class="head-tools">
+          <input id="goto" placeholder="address or symbol" spellcheck="false" aria-label="Go to address">
+          <button id="btn-follow" class="toggle on" title="Keep RIP in view">Follow RIP</button>
+        </div>
+      </div>
+      <div id="disasm" class="disasm scroll" tabindex="0"></div>
+    </section>
+
+    <section class="side">
+      <section class="panel regs-panel">
+        <div class="panel-head">
+          <h2>Registers</h2>
+          <div class="head-tools">
+            <button id="btn-xmm" class="toggle" title="Show XMM registers">XMM</button>
+          </div>
+        </div>
+        <div id="regs" class="regs"></div>
+        <div id="flags" class="flags"></div>
+        <div id="segs" class="segs"></div>
+        <div id="xmm" class="xmm hidden"></div>
+      </section>
+
+      <section class="panel stack-panel">
+        <div class="panel-head"><h2>Stack</h2><span class="hint">rsp ↓</span></div>
+        <div id="stack" class="stack scroll"></div>
+      </section>
+    </section>
+
+    <section class="panel mem-panel">
+      <div class="panel-head">
+        <h2>Memory</h2>
+        <div class="head-tools">
+          <input id="mem-addr" value="rsp" spellcheck="false" aria-label="Memory address (hex, symbol or register)">
+          <button id="btn-mem-up" title="Previous 256 bytes">&#9650;</button>
+          <button id="btn-mem-down" title="Next 256 bytes">&#9660;</button>
+        </div>
+      </div>
+      <div id="mem" class="mem scroll"></div>
+    </section>
+
+    <section class="panel bottom-panel">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="console" role="tab">Console</button>
+        <button class="tab" data-tab="syscalls" role="tab">System calls <span id="sys-count" class="count"></span></button>
+        <button class="tab" data-tab="trace" role="tab">Trace</button>
+        <button class="tab" data-tab="maps" role="tab">Memory map</button>
+        <button class="tab" data-tab="symbols" role="tab">Symbols</button>
+      </div>
+      <div class="tab-body scroll" id="tab-console">
+        <pre id="console" class="console"></pre>
+      </div>
+      <form id="input-form" class="input-row">
+        <span class="prompt">stdin&gt;</span>
+        <input id="stdin" placeholder="type input for the program and press Enter" spellcheck="false" autocomplete="off">
+      </form>
+      <div class="tab-body scroll hidden" id="tab-syscalls"><div id="syscalls" class="list"></div></div>
+      <div class="tab-body scroll hidden" id="tab-trace"><div id="trace" class="list"></div></div>
+      <div class="tab-body scroll hidden" id="tab-maps"><div id="maps" class="list"></div></div>
+      <div class="tab-body scroll hidden" id="tab-symbols">
+        <input id="sym-filter" class="filter" placeholder="filter symbols" spellcheck="false">
+        <div id="symbols" class="list"></div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="load-dialog">
+    <form method="dialog" id="load-form">
+      <h3>Load program</h3>
+      <label>Files on this machine (comma-separated: an ELF executable, one or more .o files, or a flat .com)
+        <input id="load-files" spellcheck="false" placeholder="/path/to/prog.o, /path/to/lib.o">
+      </label>
+      <label>Arguments <input id="load-args" spellcheck="false"></label>
+      <label>Mode
+        <select id="load-bits"><option value="0">auto</option><option value="64">64-bit</option><option value="32">32-bit</option><option value="16">16-bit real mode</option></select>
+      </label>
+      <p id="load-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button id="load-ok" class="primary" value="ok">Load</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

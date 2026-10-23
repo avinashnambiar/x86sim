@@ -1,0 +1,67 @@
+#!/bin/bash
+# x86cc — build C or assembly into x86 objects for x86sim, optionally run them.
+#
+#   ./x86cc prog.c                 compile to build/guest/prog.o (+ runtime)
+#   ./x86cc --run prog.c [-- args] compile and run in the simulator
+#   ./x86cc --ui prog.c            compile and open the web debugger
+#   ./x86cc --debug prog.c         compile and start the terminal debugger
+#
+# Options: --32 (i386), --16 (real-mode assembly), -O0..-O3, any other clang flag.
+# C programs get the tiny runtime in runtime/ (print_*, sim_read/sim_write,
+# memcpy...). Programs may define main() or _start.
+set -e
+here="$(cd "$(dirname "$0")" && pwd)"
+target="x86_64-linux-gnu"
+bits=""
+mode=""
+opt="-O1"
+flags=()
+srcs=()
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --run) mode=run ;;
+        --ui) mode=ui ;;
+        --debug) mode=debug ;;
+        --32) target="i386-linux-gnu"; bits="" ;;
+        --16) target="i386-linux-gnu"; bits="-b 16" ;;
+        -O*) opt="$1" ;;
+        --) shift; args=("$@"); break ;;
+        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*) flags+=("$1") ;;
+        *) srcs+=("$1") ;;
+    esac
+    shift
+done
+[ ${#srcs[@]} -gt 0 ] || { echo "usage: x86cc [--run|--ui|--debug] [--32|--16] file.c|file.s ... [-- args]"; exit 2; }
+
+out="$here/build/guest"
+mkdir -p "$out"
+common=(-target "$target" "$opt" -g -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables -fno-builtin -fno-pic -I"$here/runtime")
+objs=()
+need_runtime=0
+for s in "${srcs[@]}"; do
+    base="$(basename "${s%.*}")"
+    o="$out/$base.o"
+    case "$s" in
+        *.c) need_runtime=1; clang "${common[@]}" "${flags[@]}" -c "$s" -o "$o" ;;
+        *.s|*.S) clang -target "$target" "${flags[@]}" -c "$s" -o "$o" ;;
+        *.o) o="$s" ;;
+        *) echo "x86cc: don't know how to build $s"; exit 2 ;;
+    esac
+    objs+=("$o")
+done
+if [ $need_runtime = 1 ]; then
+    rt="$out/runtime-${target%%-*}.o"
+    clang "${common[@]}" -c "$here/runtime/sim_libc.c" -o "$rt"
+    objs+=("$rt")
+fi
+
+[ -x "$here/x86sim" ] || make -C "$here" -s
+case "$mode" in
+    run) exec "$here/x86sim" $bits "${objs[@]}" -- "${args[@]}" ;;
+    ui) exec "$here/x86sim" --ui $bits "${objs[@]}" -- "${args[@]}" ;;
+    debug) exec "$here/x86sim" --debug $bits "${objs[@]}" -- "${args[@]}" ;;
+    *) echo "built: ${objs[*]}"
+       echo "run:   ./x86sim $bits ${objs[*]}" ;;
+esac

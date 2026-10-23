@@ -1,0 +1,7 @@
+# build outputs
+/build/
+/x86sim
+/tests/out/
+*.o
+*.dSYM/
+.DS_Store
