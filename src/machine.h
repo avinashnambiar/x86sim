@@ -46,7 +46,7 @@ enum StopReason {
 };
 
 #define MAX_BP 64
-#define MAX_CPUS 4
+#define MAX_CPUS 255 /* xAPIC: 8-bit APIC IDs, 0xFF is broadcast */
 #define TRACE_LEN 512
 #define SYSLOG_LEN 256
 
@@ -71,7 +71,7 @@ typedef struct Machine {
     int pc_boot;                    /* boot drive: 'a', 'c' or 0 (hard disk, then floppy) */
     int pc_console;                 /* keystrokes come from the host terminal */
     int yield_on_idle;              /* web UI: end a run chunk when the guest idles */
-    int pc_smp;                     /* --smp: number of CPUs (1-4) */
+    int pc_smp;                     /* --smp: number of CPUs (1-MAX_CPUS) */
     int pc_cache;                   /* --cache: simulate L1/L2 caches with MESI coherence */
     struct CacheSys *cache;
     uint64_t cycles;                /* PC mode: instruction rounds (the virtual clock) */

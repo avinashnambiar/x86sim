@@ -15,6 +15,7 @@
 #define BIOS_STUBS 0xF0000u /* one 16-byte HLE stub per interrupt vector */
 #define BIOS_PORT 0xEF      /* the stubs trap into C with OUT to this port */
 #define CACHE_PORT 0xEC     /* debug: OUT dword = physical address, IN dword = its line states */
+#define CACHE_CORE_PORT 0xED /* debug: OUT byte = first of the four cores CACHE_PORT reports */
 
 typedef struct {
     uint8_t irr, isr, imr, lines, elcr;
@@ -144,6 +145,7 @@ struct PC {
     uint16_t isa_lines;  /* current ISA IRQ input levels */
     InQ in_uart, in_kbd;
     uint32_t cache_query;  /* address for CACHE_PORT */
+    uint8_t cache_core;    /* first core for CACHE_PORT */
 
     /* firmware state */
     uint8_t kb_flags, kb_e0;

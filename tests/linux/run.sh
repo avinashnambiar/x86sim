@@ -2,7 +2,7 @@
 # Boot a stock Linux kernel (Alpine linux-virt 6.6, downloaded once into
 # tests/linux/cache) with a tiny initramfs whose /init echoes a typed line
 # and reboots. Passes when the line comes back and the guest resets cleanly:
-# on one CPU, on two CPUs, and on two CPUs with the MESI cache hierarchy.
+# on one CPU, on two CPUs, and on two and eight CPUs with the MESI cache hierarchy.
 cd "$(dirname "$0")/../.."
 CACHE=tests/linux/cache
 OUT=tests/out
@@ -36,4 +36,5 @@ boot() {
 boot linux-boot ""
 boot linux-smp "--smp 2" "Brought up 1 node, 2 CPUs"
 boot linux-smp-cache "--smp 2 --cache" "Brought up 1 node, 2 CPUs"
+boot linux-smp8-cache "--smp 8 --cache" "Brought up 1 node, 8 CPUs"
 exit $fail

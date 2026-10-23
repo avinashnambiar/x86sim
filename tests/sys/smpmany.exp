@@ -1,0 +1,5 @@
+cpus (cpuid 0xb, cpuid 1) 00000020 00000020 
+aps up, distinct ids, bsp bit 0000001f 0000001f 00000000 
+counter, expected 00007d00 00007d00 
+broadcast ipis taken 0000001f 
+bye

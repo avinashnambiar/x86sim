@@ -2,6 +2,9 @@
  * timer in one-shot, periodic and TSC-deadline modes; IPIs with fixed,
  * lowest-priority, NMI, INIT and STARTUP delivery to physical or logical
  * destinations) and an 82093AA-style I/O APIC (24 pins at 0xFEC00000).
+ * APIC IDs are 8 bits and 0xFF is the broadcast destination, so a machine
+ * has at most 255 CPUs; flat logical destinations reach the first 8,
+ * cluster destinations 60 (15 clusters of 4).
  * The APIC bus clock is 1 GHz, the same as the TSC and the crystal reported
  * by CPUID leaf 0x15. */
 #include "pc_internal.h"
@@ -90,18 +93,18 @@ static int dest_match(PC *pc, int i, uint32_t dest, int logical) {
     return (ldr >> 4) == (dest >> 4) && (ldr & dest & 0xF) != 0;
 }
 
-/* Deliver to the CPUs in mask. mode: 0 fixed, 1 lowest priority, 4 NMI,
- * 5 INIT, 6 STARTUP. */
-static void deliver(PC *pc, uint32_t mask, int mode, int vector, int level) {
+/* Deliver to the CPUs with tgt[i] set. mode: 0 fixed, 1 lowest priority,
+ * 4 NMI, 5 INIT, 6 STARTUP. */
+static void deliver(PC *pc, const uint8_t *tgt, int mode, int vector, int level) {
+    int best = -1;
     if (mode == 1) { /* lowest priority: the enabled target with the lowest TPR */
-        int best = -1;
         for (int i = 0; i < ncpu(pc); i++)
-            if ((mask >> i & 1) && lapic_on(pc, i) && (best < 0 || pc->lapic[i].tpr < pc->lapic[best].tpr)) best = i;
-        mask = best < 0 ? 0 : 1u << best;
+            if (tgt[i] && lapic_on(pc, i) && (best < 0 || pc->lapic[i].tpr < pc->lapic[best].tpr)) best = i;
+        if (best < 0) return;
         mode = 0;
     }
     for (int i = 0; i < ncpu(pc); i++) {
-        if (!(mask >> i & 1)) continue;
+        if (best >= 0 ? i != best : !tgt[i]) continue;
         switch (mode) {
         case 0: lapic_accept(pc, i, vector, level); break;
         case 4: cpu_at(pc, i)->nmi_pending = 1; break;
@@ -210,19 +213,18 @@ static void send_ipi(PC *pc, int src) {
     Lapic *a = &pc->lapic[src];
     uint32_t lo = a->icr_lo;
     int shorthand = (lo >> 18) & 3, mode = (lo >> 8) & 7;
-    uint32_t mask = 0, all = (1u << ncpu(pc)) - 1;
+    uint8_t tgt[MAX_CPUS];
     if (mode == 5 && !(lo & (1u << 14)) && (lo & (1u << 15))) return; /* INIT level de-assert */
-    switch (shorthand) {
-    case 0:
-        for (int i = 0; i < ncpu(pc); i++)
-            if (dest_match(pc, i, a->icr_hi >> 24, (lo & 0x800) != 0)) mask |= 1u << i;
-        break;
-    case 1: mask = 1u << src; break;
-    case 2: mask = all; break;
-    case 3: mask = all & ~(1u << src); break;
+    for (int i = 0; i < ncpu(pc); i++) {
+        switch (shorthand) {
+        case 0: tgt[i] = (uint8_t)dest_match(pc, i, a->icr_hi >> 24, (lo & 0x800) != 0); break;
+        case 1: tgt[i] = i == src; break;
+        case 2: tgt[i] = 1; break;
+        default: tgt[i] = i != src; break;
+        }
     }
-    if (mode == 5 || mode == 6) mask &= ~1u; /* INIT/STARTUP never reset the bootstrap processor */
-    deliver(pc, mask, mode, (int)(lo & 0xFF), 0);
+    if (mode == 5 || mode == 6) tgt[0] = 0; /* INIT/STARTUP never reset the bootstrap processor */
+    deliver(pc, tgt, mode, (int)(lo & 0xFF), 0);
 }
 
 static void lapic_write(PC *pc, int i, uint32_t off, uint32_t v) {
@@ -313,10 +315,9 @@ static void ioapic_deliver(PC *pc, int pin) {
     uint64_t e = pc->ioapic.redir[pin];
     int mode = (int)(e >> 8) & 7;
     if (mode == 7) return; /* ExtINT: the 8259 path already carries it */
-    uint32_t mask = 0;
-    for (int i = 0; i < ncpu(pc); i++)
-        if (dest_match(pc, i, (uint32_t)(e >> 56), (e & RE_LOGICAL) != 0)) mask |= 1u << i;
-    if (mode == 0 || mode == 1 || mode == 4) deliver(pc, mask, mode, (int)(e & 0xFF), (e & RE_LEVEL) != 0);
+    uint8_t tgt[MAX_CPUS];
+    for (int i = 0; i < ncpu(pc); i++) tgt[i] = (uint8_t)dest_match(pc, i, (uint32_t)(e >> 56), (e & RE_LOGICAL) != 0);
+    if (mode == 0 || mode == 1 || mode == 4) deliver(pc, tgt, mode, (int)(e & 0xFF), (e & RE_LEVEL) != 0);
 }
 
 static void ioapic_service(PC *pc, int pin) {
@@ -425,6 +426,6 @@ void apic_reset(PC *pc) {
         cpu_at(pc, i)->msr.apic_base = LAPIC_BASE | 0x800 | (i == 0 ? 0x100 : 0); /* enabled; BSP flag */
     }
     memset(&pc->ioapic, 0, sizeof pc->ioapic);
-    pc->ioapic.id = (uint32_t)ncpu(pc); /* after the local APIC IDs */
+    pc->ioapic.id = (uint32_t)(ncpu(pc) < 15 ? ncpu(pc) : 15); /* after the local APIC IDs (4-bit register) */
     for (int i = 0; i < 24; i++) pc->ioapic.redir[i] = RE_MASKED;
 }

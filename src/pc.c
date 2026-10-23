@@ -1317,7 +1317,7 @@ static void port_write8(PC *pc, uint16_t port, uint8_t v) {
 }
 
 uint32_t pc_port_read(PC *pc, uint16_t port, int size) {
-    if (port == CACHE_PORT && size == 4) return pc->m->cache ? cache_line_states(pc->m->cache, pc->cache_query) : 0;
+    if (port == CACHE_PORT && size == 4) return pc->m->cache ? cache_line_states(pc->m->cache, pc->cache_query, pc->cache_core) : 0;
     if (port == 0x1F0) return ide_data_read(pc, size == 4 ? 4 : 2) & (size == 1 ? 0xFF : 0xFFFFFFFF);
     if (port == 0xCF8 && size == 4) return pc->pci.addr;
     if (port >= 0xCFC && port <= 0xCFF && (pc->pci.addr & 0x80000000)) {
@@ -1331,6 +1331,7 @@ uint32_t pc_port_read(PC *pc, uint16_t port, int size) {
 
 void pc_port_write(PC *pc, uint16_t port, int size, uint32_t v) {
     if (port == CACHE_PORT && size == 4) { pc->cache_query = v; return; }
+    if (port == CACHE_CORE_PORT) { pc->cache_core = (uint8_t)v; return; }
     if (port == 0x1F0) { ide_data_write(pc, size == 4 ? 4 : 2, v); return; }
     if (port == 0xCF8 && size == 4) { pc->pci.addr = v; return; }
     if (port >= 0xCFC && port <= 0xCFF && (pc->pci.addr & 0x80000000)) {
@@ -1572,10 +1573,8 @@ int pc_load(Machine *m, char *err, size_t errn) {
     c->mem = m->mem;
     cpu_reset_system(c);
     setup_cpu(m, c, 0);
-    for (int i = 1; i < m->ncpu; i++) {
-        m->cpus[i] = calloc(1, sizeof(CPU));
-        pc_cpu_init(pc, i);
-    }
+    for (int i = 1; i < m->ncpu; i++) m->cpus[i] = calloc(1, sizeof(CPU));
+    for (int i = 1; i < m->ncpu; i++) pc_cpu_init(pc, i); /* scans every CPU: allocate them first */
     m->os = OS_PC;
 
     pc->console = m->pc_console;

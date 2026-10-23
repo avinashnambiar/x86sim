@@ -4,7 +4,7 @@ An x86-64 CPU simulator written in C, with a web-based step debugger and a
 terminal debugger. It runs compiled programs in 16-bit real mode (DOS-style)
 and 32/64-bit Linux user mode, and emulates a full PC — firmware, interrupt
 controllers, timers, serial port, keyboard, VGA text, IDE disk — that boots a
-stock Linux kernel on up to four CPUs, optionally through a simulated MESI
+stock Linux kernel on up to 255 CPUs, optionally through a simulated MESI
 cache hierarchy.
 
 ```
@@ -44,7 +44,7 @@ The program can be:
 | `--ram MB` | PC memory size (default 256) |
 | `--hda F`, `--fda F`, `--boot a\|c` | disk images and boot drive |
 | `--kernel F`, `--initrd F`, `--append S` | boot a Linux bzImage (32-bit boot protocol) |
-| `--smp N` | N CPUs (1-4) |
+| `--smp N` | N CPUs (1-255) |
 | `--cache` | simulate the cache hierarchy; `--cache-stats` also prints statistics at exit |
 
 The options from `--pc` down imply PC mode. There the terminal is the serial
@@ -71,7 +71,8 @@ byte to port 0xF4 exits with that code.
   **Symbols** tabs.
 - In PC mode: a **Screen** tab (VGA text and mode 13h; click it and type to
   send keys), control registers and the operating mode in the header, a **CPU
-  switcher** (registers, disassembly, stack and memory follow the selected CPU)
+  switcher** (registers, disassembly, stack and memory follow the selected CPU;
+  buttons up to 8 CPUs, a drop-down with a running/halted summary beyond)
   and, with `--cache`, a **Caches** tab: hit rates, MESI line counts per
   cache, bus traffic, the state of any line in every cache, and a live log of
   coherence events.
@@ -80,7 +81,7 @@ The server binds to 127.0.0.1 only.
 
 ## Multiprocessor and caches
 
-`--smp N` gives the PC N CPUs. CPU 0 boots; the others wait in the
+`--smp N` gives the PC N CPUs, from 1 to 255. CPU 0 boots; the others wait in the
 wait-for-SIPI state until the bootstrap processor sends INIT and STARTUP
 IPIs, exactly as on real hardware, and the ACPI MADT and MP table list them
 all. Each CPU has its own local APIC (APIC ID = CPU number) with fixed,
@@ -90,6 +91,16 @@ CPUs execute in a deterministic round robin, one instruction each per round,
 so LOCK-prefixed instructions are atomic and runs are reproducible, while
 plain read-modify-write sequences still race (see `tests/sys/smp.S`).
 CPUID reports the topology (leaf 1, leaf 0xB) and the caches (leaf 4).
+
+The limit of 255 is the xAPIC architecture's: APIC IDs are 8 bits and 0xFF
+means broadcast. Flat logical destinations address at most 8 CPUs and
+cluster mode 60 (15 clusters of 4), so larger systems use physical
+destinations; going further would need x2APIC (32-bit IDs) and interrupt
+remapping. Each CPU costs about 30 KiB, plus 80 KiB of L1 with `--cache`.
+Simulation time grows linearly with the number of running CPUs (halted ones
+are cheap): Linux boots on 8 CPUs in about 45 s and on 64 in about 3 minutes.
+`tests/sys/smpmany.S` wakes all APs at once with a broadcast INIT/STARTUP and
+checks their APIC IDs, an atomic counter and a broadcast IPI.
 
 `--cache` puts every memory access through a simulated hierarchy:
 
@@ -118,7 +129,10 @@ instruction cache. CLFLUSH/CLFLUSHOPT write a line back and drop it
 everywhere; WBINVD and INVD flush everything. Legacy video memory, the BIOS
 ROM and MMIO are uncached. A guest can query a line's states through port
 0xEC (write the physical address as a dword, read back two bits per cache:
-cpu k's L1D in bits 4k–4k+1, its L1I in 4k+2–4k+3, the L2 in bits 16–17).
+cpu first+k's L1D in bits 4k–4k+1, its L1I in 4k+2–4k+3, the L2 in bits
+16–17). Four cores fit in a reply; writing a byte to port 0xED selects the
+first core (default 0). With many sharers the event log names four snooped
+copies and counts the rest.
 
 The terminal debugger has `cpu [n]`, `cache [addr]` and `cachelog [n]`.
 
@@ -169,12 +183,13 @@ edge-case values and compares every architecturally defined flag.
 
 - `tests/sys/run.sh` — bare-metal programs booted in PC mode: protected and
   long mode, paging, task switches, VM86, BIOS services and devices, disk and
-  floppy boot, CET, SMP bring-up with IPIs and shared counters, and the MESI
-  transitions of one line (`smpcache`).
+  floppy boot, CET, SMP bring-up with IPIs and shared counters, the MESI
+  transitions of one line (`smpcache`), and 32 CPUs started at once
+  (`smpmany`).
 - `tests/softfloat/run.sh` — x87 arithmetic and transcendentals against
   reference results.
 - `tests/linux/run.sh` — boots Alpine's Linux 6.6 kernel (downloaded once) on
-  one CPU, on two CPUs, and on two CPUs with the caches; types a line into
+  one CPU, on two CPUs, and on two and eight CPUs with the caches; types a line into
   `/init` and checks the echo and the clean reboot.
 
 ## Status
@@ -187,7 +202,7 @@ Implemented:
 - System architecture: real/protected/long/VM86 modes, paging with PCID,
   SMEP/SMAP, protection keys, hardware task switching, SYSCALL/SYSENTER,
   XSAVE, FSGSBASE, UMIP, LA57, CET (shadow stacks, IBT)
-- A PC that boots disks, floppies and Linux, with SMP (up to 4 CPUs) and a
+- A PC that boots disks, floppies and Linux, with SMP (up to 255 CPUs) and a
   MESI cache hierarchy
 - Linux user mode (≈45 syscalls), DOS int 21h and BIOS services
 

@@ -122,26 +122,56 @@ function renderHeader(st) {
 }
 
 /* CPU switcher: shown with more than one CPU; the registers, disassembly,
- * stack and memory views follow the selected CPU. */
+ * stack and memory views follow the selected CPU. Up to 8 CPUs get buttons;
+ * beyond that a drop-down plus a running/halted summary. */
+const CPU_BUTTONS_MAX = 8;
+function cpuTitle(c, i) {
+  return `cpu${i}: ${c.state}, ${Number(c.icount).toLocaleString()} instructions`;
+}
 function renderCpus(st) {
   const box = $('cpu-select');
   const cpus = st.cpus || [];
   box.classList.toggle('hidden', cpus.length < 2);
   if (cpus.length < 2) return;
-  box.innerHTML = cpus.map((c, i) =>
-    `<button class="cpu-btn${i === st.view_cpu ? ' on' : ''}" data-cpu="${i}" role="tab" aria-selected="${i === st.view_cpu}" title="cpu${i}: ${c.state}, ${Number(c.icount).toLocaleString()} instructions"><span class="dot ${c.state}"></span>cpu${i}</button>`).join('');
+  if (cpus.length <= CPU_BUTTONS_MAX) {
+    box.innerHTML = cpus.map((c, i) =>
+      `<button class="cpu-btn${i === st.view_cpu ? ' on' : ''}" data-cpu="${i}" role="tab" aria-selected="${i === st.view_cpu}" title="${esc(cpuTitle(c, i))}"><span class="dot ${c.state}"></span>cpu${i}</button>`).join('');
+    return;
+  }
+  let sel = box.querySelector('select');
+  if (!sel || sel.options.length !== cpus.length) { /* rebuilt only when the count changes, so an open list stays open */
+    box.innerHTML = `<span class="dot" id="cpu-dot"></span><select id="cpu-pick" aria-label="CPU shown"></select><span class="cpu-sum" id="cpu-sum"></span>`;
+    sel = box.querySelector('select');
+    sel.innerHTML = cpus.map((_, i) => `<option value="${i}">cpu${i}</option>`).join('');
+  }
+  const count = {};
+  cpus.forEach((c, i) => {
+    count[c.state] = (count[c.state] || 0) + 1;
+    const o = sel.options[i];
+    o.textContent = `cpu${i} \u00b7 ${c.state}`;
+    o.title = cpuTitle(c, i);
+  });
+  if (document.activeElement !== sel) sel.value = String(st.view_cpu);
+  $('cpu-dot').className = 'dot ' + (cpus[st.view_cpu] || {}).state;
+  $('cpu-sum').textContent = `${cpus.length} CPUs: ` + Object.entries(count).map(([k, v]) => `${v} ${k}`).join(', ');
 }
-$('cpu-select').addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-cpu]');
-  if (!b || S.running) return;
+async function selectCpu(n) {
+  if (S.running) return;
   try {
     S.follow = true;
-    const st = await post('/api/cpu?n=' + b.dataset.cpu);
+    const st = await post('/api/cpu?n=' + n);
     S.prev = null;
     await refresh(st);
   } catch (err) {
     toast(err.message);
   }
+}
+$('cpu-select').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-cpu]');
+  if (b) selectCpu(b.dataset.cpu);
+});
+$('cpu-select').addEventListener('change', (e) => {
+  if (e.target.id === 'cpu-pick') selectCpu(e.target.value);
 });
 
 /* ---------- caches ---------- */
@@ -170,10 +200,13 @@ async function renderCache() {
   $('cache-bus').innerHTML = `<b>bus</b> BusRd ${num(b.BusRd)} · BusRdX ${num(b.BusRdX)} · BusUpgr ${num(b.BusUpgr)} · BusWB ${num(b.BusWB)} · cache-to-cache ${num(b.c2c)} &nbsp; <b>memory</b> ${num(b.mem_reads)} line reads · ${num(b.mem_writes)} line writes · ${num(b.uncached)} uncached`;
   if (res.line) {
     const l = res.line;
-    const badges = l.states.map(([n, st]) => {
+    /* past 16 units (8 cores) only the units holding the line are listed */
+    const many = l.states.length > 17;
+    const shown = many ? l.states.filter(([n, st]) => n === 'L2' || st !== 'I') : l.states;
+    const badges = shown.map(([n, st]) => {
       const k = st === 'dirty' ? 'M' : st === 'clean' ? 'E' : st;
       return `<div class="line-unit"><span>${esc(n)}</span><span class="state ${MESI_CLASS[k] || ''}">${esc(st)}</span></div>`;
-    }).join('');
+    }).join('') + (many ? `<div class="muted">${l.states.length - shown.length} other L1s: I</div>` : '');
     const data = l.data.replace(/(..)/g, '$1 ').trim().replace(/((?:.. ){15}..) /g, '$1\n');
     $('line-view').className = 'line-view';
     $('line-view').innerHTML = `<div class="muted">line ${esc(l.addr)} · L1 set ${l.l1_set} · L2 set ${l.l2_set}${l.cacheable ? '' : ' · uncacheable'}</div>${badges}<pre class="line-data">${data}</pre>`;

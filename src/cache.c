@@ -19,17 +19,13 @@
 
 const char cache_state_char[4] = {'I', 'S', 'E', 'M'};
 
-static const char *const unit_names[CACHE_MAX_CORES][2] = {
-    {"cpu0 L1D", "cpu0 L1I"}, {"cpu1 L1D", "cpu1 L1I"}, {"cpu2 L1D", "cpu2 L1I"}, {"cpu3 L1D", "cpu3 L1I"},
-};
-
 const char *cache_op_name(int op) {
     static const char *const n[] = {"BusRd", "BusRdX", "BusUpgr", "BusWB", "BackInv", "Flush"};
     return op >= 0 && op < 6 ? n[op] : "?";
 }
 
 static void cache_init(Cache *c, const char *name, int size, int ways) {
-    c->name = name;
+    snprintf(c->name, sizeof c->name, "%s", name);
     c->ways = ways;
     c->sets = size / (ways * CACHE_LINE);
     c->lines = calloc((size_t)c->sets * (size_t)ways, sizeof *c->lines);
@@ -38,10 +34,15 @@ static void cache_init(Cache *c, const char *name, int size, int ways) {
 CacheSys *cache_new(Mem *mem, int ncores) {
     CacheSys *s = calloc(1, sizeof *s);
     s->mem = mem;
-    s->ncores = ncores < 1 ? 1 : ncores > CACHE_MAX_CORES ? CACHE_MAX_CORES : ncores;
+    s->ncores = ncores < 1 ? 1 : ncores;
+    s->l1d = calloc((size_t)s->ncores, sizeof *s->l1d);
+    s->l1i = calloc((size_t)s->ncores, sizeof *s->l1i);
     for (int i = 0; i < s->ncores; i++) {
-        cache_init(&s->l1d[i], unit_names[i][0], 48 * 1024, 12); /* 64 sets */
-        cache_init(&s->l1i[i], unit_names[i][1], 32 * 1024, 8);  /* 64 sets */
+        char name[16];
+        snprintf(name, sizeof name, "cpu%d L1D", i);
+        cache_init(&s->l1d[i], name, 48 * 1024, 12); /* 64 sets */
+        snprintf(name, sizeof name, "cpu%d L1I", i);
+        cache_init(&s->l1i[i], name, 32 * 1024, 8);  /* 64 sets */
     }
     cache_init(&s->l2, "L2", 3 * 1024 * 1024, 12); /* 4096 sets */
     return s;
@@ -53,6 +54,8 @@ void cache_free(CacheSys *s) {
         free(s->l1d[i].lines);
         free(s->l1i[i].lines);
     }
+    free(s->l1d);
+    free(s->l1i);
     free(s->l2.lines);
     free(s);
 }
@@ -101,15 +104,17 @@ static CohEvent *log_event(CacheSys *s, int op, int unit, uint64_t line, int fro
     CohEvent *e = &s->log[s->nlog % CACHE_LOG_LEN];
     e->seq = s->nlog++;
     e->op = (uint8_t)op;
-    e->unit = (uint8_t)unit;
+    e->unit = (uint16_t)unit;
     e->line = line;
     e->from = e->to = (uint8_t)from;
     e->npeers = 0;
+    e->nsnooped = 0;
     return e;
 }
 
 static void log_peer(CohEvent *e, int unit, int from, int to) {
-    if (e->npeers < 4) e->peers[e->npeers++] = (uint8_t)(unit << 4 | from << 2 | to);
+    e->nsnooped++;
+    if (e->npeers < 4) e->peers[e->npeers++] = (uint16_t)(unit << 4 | from << 2 | to);
 }
 
 /* ---- L2 ---- */
@@ -129,7 +134,7 @@ static void mem_writeback(CacheSys *s, uint64_t line, const uint8_t *data) {
  * write the line to memory if dirty. */
 static void l2_evict(CacheSys *s, CacheLine *v) {
     Cache *c = &s->l2;
-    CohEvent *e = log_event(s, BUS_BACKINV, 255, v->tag, v->state);
+    CohEvent *e = log_event(s, BUS_BACKINV, CACHE_UNIT_L2, v->tag, v->state);
     c->st.evictions++;
     for (int u = 0; u < nunits(s); u++) {
         Cache *x = unit_cache(s, u);
@@ -350,7 +355,7 @@ void cache_flush_line(CacheSys *s, uint64_t pa, int invalidate) {
     uint64_t line = pa >> 6;
     CacheLine *l2 = find(&s->l2, line);
     if (!l2) return; /* not cached anywhere (inclusion) */
-    CohEvent *e = log_event(s, BUS_FLUSH, 255, line, l2->state);
+    CohEvent *e = log_event(s, BUS_FLUSH, CACHE_UNIT_L2, line, l2->state);
     for (int u = 0; u < nunits(s); u++) {
         Cache *x = unit_cache(s, u);
         CacheLine *l = find(x, line);
@@ -393,16 +398,23 @@ void cache_flush_all(CacheSys *s) {
         }
         if (l->state != MESI_I) set_state(c, l, MESI_I);
     }
-    log_event(s, BUS_FLUSH, 255, 0, MESI_I);
+    log_event(s, BUS_FLUSH, CACHE_UNIT_L2, 0, MESI_I);
 }
 
-uint32_t cache_line_states(CacheSys *s, uint64_t pa) {
+int cache_unit_state(CacheSys *s, int unit, uint64_t pa) {
+    if (unit != CACHE_UNIT_L2 && (unit < 0 || unit >= nunits(s))) return MESI_I;
+    CacheLine *l = find(unit == CACHE_UNIT_L2 ? &s->l2 : unit_cache(s, unit), pa >> 6);
+    return l ? l->state : MESI_I;
+}
+
+uint32_t cache_line_states(CacheSys *s, uint64_t pa, int first) {
     uint64_t line = pa >> 6;
     uint32_t v = 0;
-    for (int c = 0; c < s->ncores; c++) {
+    for (int k = 0; k < 4 && first + k < s->ncores; k++) {
+        int c = first + k;
         CacheLine *d = find(&s->l1d[c], line), *i = find(&s->l1i[c], line);
-        v |= (uint32_t)(d ? d->state : 0) << (4 * c);
-        v |= (uint32_t)(i ? i->state : 0) << (4 * c + 2);
+        v |= (uint32_t)(d ? d->state : 0) << (4 * k);
+        v |= (uint32_t)(i ? i->state : 0) << (4 * k + 2);
     }
     CacheLine *l2 = find(&s->l2, line);
     v |= (uint32_t)(l2 ? l2->state : 0) << 16;
@@ -412,7 +424,7 @@ uint32_t cache_line_states(CacheSys *s, uint64_t pa) {
 /* ---- reports ---- */
 
 const char *cache_unit_name(CacheSys *s, int unit) {
-    if (unit == 255) return "L2";
+    if (unit == CACHE_UNIT_L2) return "L2";
     return unit_cache(s, unit)->name;
 }
 
@@ -425,6 +437,8 @@ void cache_format_event(CacheSys *s, const CohEvent *e, char *buf, size_t n) {
         k += snprintf(buf + k, n - (size_t)k, "%s %s %c->%c", i ? "," : ";", cache_unit_name(s, p >> 4),
                       cache_state_char[(p >> 2) & 3], cache_state_char[p & 3]);
     }
+    if (e->nsnooped > e->npeers && k > 0 && (size_t)k < n)
+        snprintf(buf + k, n - (size_t)k, " (+%d more)", e->nsnooped - e->npeers);
 }
 
 static void print_cache(Cache *c, FILE *f) {

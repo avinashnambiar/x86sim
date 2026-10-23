@@ -507,7 +507,7 @@ static void cpuid(CPU *c) {
     case 1:
         a = 0x000906EA;            /* family 6 */
         b = 0x00000800             /* CLFLUSH line 64 bytes */
-          | (1u << core_bits) << 16 /* addressable logical processor IDs in the package */
+          | (core_bits < 8 ? 1u << core_bits : 255) << 16 /* addressable logical processor IDs (8-bit field) */
           | id << 24;              /* initial APIC ID */
         cc = (1u << 0)             /* SSE3 */
            | (1u << 1)             /* PCLMULQDQ */
@@ -570,7 +570,7 @@ static void cpuid(CPU *c) {
         if (sub < 3) {
             a = cp[sub].type | cp[sub].level << 5 | 1u << 8 /* self-initializing */
               | (cp[sub].shared ? ((1u << core_bits) - 1) : 0) << 14 /* logical processors sharing it - 1 */
-              | ((1u << core_bits) - 1) << 26;                         /* cores in the package - 1 */
+              | (core_bits < 6 ? (1u << core_bits) - 1 : 63) << 26;    /* cores in the package - 1 (6-bit field) */
             b = (cp[sub].ways - 1) << 22 | 63; /* ways, one partition, 64-byte lines */
             cc = cp[sub].sets - 1;
             d = cp[sub].level == 2 ? 1u << 1 : 0; /* L2 inclusive of the lower levels */

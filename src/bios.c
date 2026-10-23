@@ -24,7 +24,7 @@ extern const char pc_kb_lower[], pc_kb_upper[];
 #define BDA 0x400
 #define EBDA_SEG 0x9FC0
 #define TABLES 0xF2000u /* diskette/fixed-disk parameters, config table */
-#define MPTABLE 0xF1000u
+#define MPTABLE 0xF6000u /* up to 0xF7FFF: ~5.3 KiB with 255 CPUs */
 
 /* ---- guest access ---- */
 
@@ -713,8 +713,8 @@ static uint8_t checksum(PC *pc, uint64_t a, int n) {
 }
 
 static void mp_table(PC *pc) {
-    uint8_t t[512];
-    int n = 44, entries = 0, ioapic_id = pc->m->ncpu;
+    static uint8_t t[8192];
+    int n = 44, entries = 0, ioapic_id = pc->ioapic.id;
     uint8_t *e;
     memset(t, 0, sizeof t);
     /* processors: APIC ID = CPU number, CPU 0 boots */
@@ -775,7 +775,7 @@ static void mp_table(PC *pc) {
 }
 
 /* ACPI: RSDP -> RSDT -> MADT (local APIC, I/O APIC, IRQ 0 -> GSI 2, LINT1 NMI) */
-#define ACPI_BASE 0xF1100u
+#define ACPI_BASE 0xF4000u /* RSDP; RSDT at +0x100, MADT (~2.1 KiB with 255 CPUs) at +0x200 */
 
 static void acpi_header(uint8_t *t, const char *sig, uint32_t len) {
     memcpy(t, sig, 4);
@@ -790,7 +790,8 @@ static void acpi_header(uint8_t *t, const char *sig, uint32_t len) {
 
 static void acpi_tables(PC *pc) {
     const uint32_t rsdt = ACPI_BASE + 0x100, madt = ACPI_BASE + 0x200;
-    uint8_t m[160] = {0};
+    static uint8_t m[44 + MAX_CPUS * 8 + 28];
+    memset(m, 0, sizeof m);
     uint32_t n = 44, v;
     v = LAPIC_BASE;
     memcpy(m + 36, &v, 4);
@@ -799,7 +800,7 @@ static void acpi_tables(PC *pc) {
         uint8_t lapic[8] = {0, 8, (uint8_t)i, (uint8_t)i, 1, 0, 0, 0};
         memcpy(m + n, lapic, 8), n += 8;
     }
-    uint8_t ioapic[12] = {1, 12, (uint8_t)pc->m->ncpu, 0};
+    uint8_t ioapic[12] = {1, 12, (uint8_t)pc->ioapic.id, 0};
     v = IOAPIC_BASE;
     memcpy(ioapic + 4, &v, 4);
     memcpy(m + n, ioapic, 12), n += 12;

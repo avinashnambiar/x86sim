@@ -394,7 +394,6 @@ static void api_cache(Machine *m, const char *q, Buf *b) {
     char v[64];
     if (query_get(q, "addr", v, sizeof v) && v[0]) {
         uint64_t pa = strtoull(v, NULL, 16);
-        uint32_t st = cache_line_states(s, pa);
         uint8_t data[CACHE_LINE];
         machine_phys_peek(m, pa & ~(uint64_t)(CACHE_LINE - 1), data, CACHE_LINE);
         buf_printf(b, ",\"line\":{\"addr\":");
@@ -404,8 +403,8 @@ static void api_cache(Machine *m, const char *q, Buf *b) {
                    (unsigned long long)((pa >> 6) & 4095));
         for (int u = 0; u < s->ncores * 2; u++)
             buf_printf(b, "%s[\"%s\",\"%c\"]", u ? "," : "", cache_unit_name(s, u),
-                       cache_state_char[(st >> (2 * u)) & 3]);
-        int l2 = (st >> 16) & 3;
+                       cache_state_char[cache_unit_state(s, u, pa)]);
+        int l2 = cache_unit_state(s, CACHE_UNIT_L2, pa);
         buf_printf(b, ",[\"L2\",\"%s\"]],\"data\":\"", l2 == MESI_M ? "dirty" : l2 ? "clean" : "I");
         for (int i = 0; i < CACHE_LINE; i++) buf_printf(b, "%02x", data[i]);
         buf_printf(b, "\"}");

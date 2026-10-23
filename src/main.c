@@ -38,7 +38,7 @@ static void usage(void) {
             "      --fda FILE    PC floppy image\n"
             "      --boot a|c    PC boot drive (default: hard disk, then floppy)\n"
             "      --kernel F    PC: boot a Linux bzImage (--initrd F, --append \"cmdline\")\n"
-            "      --smp N       PC with N CPUs (1-4); the others wait for INIT/STARTUP IPIs\n"
+            "      --smp N       PC with N CPUs (1-255); the others wait for INIT/STARTUP IPIs\n"
             "      --cache       simulate the caches: per CPU 48K L1D + 32K L1I, 3M shared L2,\n"
             "                    MESI coherence (statistics at exit with --cache-stats)\n"
             "\n"

@@ -18,7 +18,7 @@
 #include "mem.h"
 
 #define CACHE_LINE 64
-#define CACHE_MAX_CORES 4
+#define CACHE_UNIT_L2 0xFFF /* event unit number of the L2 / external agent */
 #define CACHE_LOG_LEN 256
 
 enum { MESI_I, MESI_S, MESI_E, MESI_M };
@@ -44,26 +44,28 @@ typedef struct {
 } CacheStats;
 
 typedef struct {
-    const char *name;
+    char name[16];
     int sets, ways;
     uint32_t clock;
     CacheLine *lines;   /* sets * ways */
     CacheStats st;
 } Cache;
 
-/* One coherence event: the requester's transition plus up to four snooped copies. */
+/* One coherence event: the requester's transition plus up to four snooped copies.
+ * Units are core * 2 + CU_* (up to 255 cores) or CACHE_UNIT_L2. */
 typedef struct {
     uint64_t seq, line;
-    uint8_t op, unit;   /* unit: core * 2 + CU_* (255 = L2 / external) */
-    uint8_t from, to;
-    uint8_t npeers;
-    uint8_t peers[4];   /* unit << 4 | from << 2 | to */
+    uint16_t unit;
+    uint8_t op, from, to;
+    uint8_t npeers;     /* recorded in peers[] */
+    uint16_t nsnooped;  /* all copies the request touched */
+    uint16_t peers[4];  /* unit << 4 | from << 2 | to */
 } CohEvent;
 
 typedef struct CacheSys {
     Mem *mem;
     int ncores;
-    Cache l1d[CACHE_MAX_CORES], l1i[CACHE_MAX_CORES], l2;
+    Cache *l1d, *l1i, l2; /* ncores each */
     struct { uint64_t lo, hi; } ranges[4]; /* cacheable physical ranges (write-back RAM) */
     int nranges;
     struct {
@@ -91,12 +93,14 @@ void cache_flush_line(CacheSys *s, uint64_t pa, int invalidate);
 /* WBINVD / INVD: write back and invalidate every cache. */
 void cache_flush_all(CacheSys *s);
 
-/* States of one line: L1D of core k in bits 4k..4k+1, its L1I in bits
- * 4k+2..4k+3, the L2 in bits 16-17 (MESI_* values). */
-uint32_t cache_line_states(CacheSys *s, uint64_t pa);
+/* States of one line for cores first..first+3: L1D of core first+k in bits
+ * 4k..4k+1, its L1I in bits 4k+2..4k+3, the L2 in bits 16-17 (MESI_* values). */
+uint32_t cache_line_states(CacheSys *s, uint64_t pa, int first);
+/* MESI state of one line in one unit (core * 2 + CU_*, CACHE_UNIT_L2). */
+int cache_unit_state(CacheSys *s, int unit, uint64_t pa);
 const char *cache_op_name(int op);
 extern const char cache_state_char[4];
-const char *cache_unit_name(CacheSys *s, int unit); /* core * 2 + CU_*, 255 = L2 */
+const char *cache_unit_name(CacheSys *s, int unit); /* core * 2 + CU_*, CACHE_UNIT_L2 */
 
 /* Text reports: statistics, where one line lives, the last n coherence events. */
 void cache_print_stats(CacheSys *s, FILE *f);

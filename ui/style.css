@@ -334,7 +334,9 @@ dialog select { background: var(--bg); border: 1px solid var(--border); border-r
 .sysregs span.changed { color: var(--changed, #e0a800); }
 
 /* ---------- CPUs and caches ---------- */
-.cpu-select { display: flex; gap: 2px; margin-left: 8px; }
+.cpu-select { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; margin-left: 8px; min-width: 0; }
+.cpu-select select { font: 11px var(--mono); padding: 2px 4px; max-width: 16ch; }
+.cpu-sum { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cpu-btn { padding: 2px 8px; font: 11px var(--mono); display: inline-flex; align-items: center; gap: 5px; }
 .cpu-btn.on { border-color: var(--accent); color: var(--accent); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); display: inline-block; }
