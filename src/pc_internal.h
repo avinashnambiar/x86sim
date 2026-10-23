@@ -16,6 +16,7 @@
 #define BIOS_PORT 0xEF      /* the stubs trap into C with OUT to this port */
 #define CACHE_PORT 0xEC     /* debug: OUT dword = physical address, IN dword = its line states */
 #define CACHE_CORE_PORT 0xED /* debug: OUT byte = first of the four cores CACHE_PORT reports */
+#define EXC_PORT 0xEE        /* the editor's exception handlers report their vector here */
 
 typedef struct {
     uint8_t irr, isr, imr, lines, elcr;

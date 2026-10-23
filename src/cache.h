@@ -96,6 +96,8 @@ void cache_flush_all(CacheSys *s);
 /* States of one line for cores first..first+3: L1D of core first+k in bits
  * 4k..4k+1, its L1I in bits 4k+2..4k+3, the L2 in bits 16-17 (MESI_* values). */
 uint32_t cache_line_states(CacheSys *s, uint64_t pa, int first);
+/* A cache by unit number (core * 2 + CU_*, CACHE_UNIT_L2); NULL if out of range. */
+Cache *cache_unit(CacheSys *s, int unit);
 /* MESI state of one line in one unit (core * 2 + CU_*, CACHE_UNIT_L2). */
 int cache_unit_state(CacheSys *s, int unit, uint64_t pa);
 const char *cache_op_name(int op);

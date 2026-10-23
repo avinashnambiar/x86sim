@@ -1329,9 +1329,41 @@ uint32_t pc_port_read(PC *pc, uint16_t port, int size) {
     return v;
 }
 
+/* An exception reached one of the editor's default handlers (stubs that
+ * OUT their vector to EXC_PORT, then halt): report it and stop the run. The
+ * frame is read at SS:RSP as a physical address (identity-mapped memory). */
+static void editor_exception(PC *pc, int vector) {
+    Machine *m = pc->m;
+    CPU *c = pc_cpu(pc);
+    int ws = c->bits == 64 ? 8 : 4;
+    int has_err = vector == 8 || (vector >= 10 && vector <= 14) || vector == 17 || vector == 21 || vector == 29 ||
+                  vector == 30;
+    uint64_t sp = c->sbase[SS] + (c->bits == 64 ? c->r[RSP] : (uint32_t)c->r[RSP]);
+    uint64_t code = 0, rip = 0;
+    if (has_err) {
+        machine_phys_peek(m, sp, &code, (size_t)ws);
+        sp += (uint64_t)ws;
+    }
+    machine_phys_peek(m, sp, &rip, (size_t)ws);
+    char msg[240];
+    int k = snprintf(msg, sizeof msg, "cpu%d: unhandled %s (vector %d) at 0x%llx", c->index,
+                     vector < 32 ? cpu_exc_name(vector) : "interrupt", vector, (unsigned long long)rip);
+    if (has_err) k += snprintf(msg + k, sizeof msg - (size_t)k, ", error code 0x%llx", (unsigned long long)code);
+    if (vector == EXC_PF) k += snprintf(msg + k, sizeof msg - (size_t)k, ", cr2 0x%llx", (unsigned long long)c->cr2);
+    snprintf(msg + k, sizeof msg - (size_t)k, "; cpu%d halted", c->index);
+    machine_output(m, "\n[x86sim] ", 10);
+    machine_output(m, msg, strlen(msg));
+    machine_output(m, "\n", 1);
+    snprintf(m->status, sizeof m->status, "%s", msg);
+    m->view_cpu = c->index;
+    m->last_stop = STOP_TRAP;
+    c->stop_request = 1;
+}
+
 void pc_port_write(PC *pc, uint16_t port, int size, uint32_t v) {
     if (port == CACHE_PORT && size == 4) { pc->cache_query = v; return; }
     if (port == CACHE_CORE_PORT) { pc->cache_core = (uint8_t)v; return; }
+    if (port == EXC_PORT) { editor_exception(pc, v & 0xFF); return; }
     if (port == 0x1F0) { ide_data_write(pc, size == 4 ? 4 : 2, v); return; }
     if (port == 0xCF8 && size == 4) { pc->pci.addr = v; return; }
     if (port >= 0xCFC && port <= 0xCFF && (pc->pci.addr & 0x80000000)) {
@@ -1555,6 +1587,137 @@ void pc_cpu_sipi(PC *pc, int i, int vector) {
     c->rip = 0;
 }
 
+/* ---- programs from the editor ---- */
+
+#define ESYS_GDT (PC_EDITOR_SYS + 0x0000)
+#define ESYS_IDT32 (PC_EDITOR_SYS + 0x1000)
+#define ESYS_IDT64 (PC_EDITOR_SYS + 0x2000)
+#define ESYS_STUBS (PC_EDITOR_SYS + 0x3000)
+#define ESYS_PML4 (PC_EDITOR_SYS + 0x4000) /* then the PDPT and four page directories */
+
+/* GDT, IDTs with one reporting stub per vector, identity page tables for 4 GiB. */
+static void editor_tables(PC *pc) {
+    Machine *m = pc->m;
+    static const uint64_t gdt[4] = {0, 0x00CF9B000000FFFFULL, 0x00CF93000000FFFFULL, 0x00AF9B000000FFFFULL};
+    machine_phys_poke(m, ESYS_GDT, gdt, sizeof gdt);
+    static uint8_t stubs[256 * 8];
+    static uint64_t idt32[256], idt64[512], pt[6 * 512];
+    for (int v = 0; v < 256; v++) {
+        const uint8_t stub[8] = {0xB0, (uint8_t)v, 0xE6, EXC_PORT, 0xF4, 0xEB, 0xFD, 0x90}; /* mov al,v; out; hlt; jmp hlt */
+        memcpy(stubs + v * 8, stub, 8);
+        uint64_t off = ESYS_STUBS + (uint64_t)v * 8;
+        idt32[v] = (off & 0xFFFF) | 0x08ULL << 16 | 0x8E00ULL << 32 | (off >> 16) << 48;  /* interrupt gates */
+        idt64[v * 2] = (off & 0xFFFF) | 0x18ULL << 16 | 0x8E00ULL << 32 | ((off >> 16) & 0xFFFF) << 48;
+        idt64[v * 2 + 1] = off >> 32;
+    }
+    pt[0] = (ESYS_PML4 + 0x1000) | 3;                      /* PML4[0] -> PDPT */
+    for (int k = 0; k < 4; k++) {
+        pt[512 + k] = (ESYS_PML4 + 0x2000 + 0x1000ULL * (uint64_t)k) | 3; /* PDPT[k] -> page directory k */
+        for (int j = 0; j < 512; j++) pt[1024 + k * 512 + j] = ((uint64_t)(k * 512 + j) << 21) | 0x83; /* 2 MiB pages */
+    }
+    machine_phys_poke(m, ESYS_STUBS, stubs, sizeof stubs);
+    machine_phys_poke(m, ESYS_IDT32, idt32, sizeof idt32);
+    machine_phys_poke(m, ESYS_IDT64, idt64, sizeof idt64);
+    machine_phys_poke(m, ESYS_PML4, pt, sizeof pt);
+}
+
+int pc_check_load(Machine *m, int bits, uint64_t addr, uint64_t size, char *err, size_t errn) {
+    PC *pc = m->pc;
+    uint64_t end = addr + size;
+    if (addr < 0x500) {
+        snprintf(err, errn, "0x%llx is in the interrupt vector table / BIOS data area (below 0x500)",
+                 (unsigned long long)addr);
+        return -1;
+    }
+    if (bits == 16) {
+        if (addr & 15) {
+            snprintf(err, errn, "16-bit code needs a 16-byte aligned address (it runs in segment addr >> 4)");
+            return -1;
+        }
+        if (size > 0xFFFF || end > 0x9FC00) {
+            snprintf(err, errn, "16-bit code must fit in 64 KiB below 0x9FC00 (the EBDA)");
+            return -1;
+        }
+        return 0;
+    }
+    if (end > 0xA0000 && addr < 0x100000) {
+        snprintf(err, errn, "0x%llx-0x%llx overlaps video memory and the BIOS (0xA0000-0xFFFFF)",
+                 (unsigned long long)addr, (unsigned long long)end);
+        return -1;
+    }
+    if (end > PC_EDITOR_SYS && addr < PC_EDITOR_SYS + 0x10000) {
+        snprintf(err, errn, "0x100000-0x10FFFF holds the editor's GDT, IDTs and page tables");
+        return -1;
+    }
+    if (end > pc->lowmem || (bits == 64 && end > 0x100000000ULL)) {
+        snprintf(err, errn, "0x%llx-0x%llx is beyond RAM (%llu MiB below 4 GiB)", (unsigned long long)addr,
+                 (unsigned long long)end, (unsigned long long)(pc->lowmem >> 20));
+        return -1;
+    }
+    return 0;
+}
+
+void pc_cpu_start(Machine *m, int i, int bits, uint64_t base, uint64_t entry, uint64_t stack) {
+    PC *pc = m->pc;
+    CPU *c = m->cpus[i];
+    uint64_t apic_base = c->msr.apic_base;
+    if (i) c->icache = m->cpu.icache; /* shared, keyed by physical address */
+    cpu_reset_system(c);
+    setup_cpu(m, c, i);
+    c->msr.apic_base = apic_base;
+    pc_set_a20(pc, 1);
+    c->cr0 = (c->cr0 & ~(CR0_CD | CR0_NW)) | CR0_MP | CR0_NE; /* caches on, x87 errors as exceptions */
+    c->cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;                     /* SSE usable */
+    if (bits == 16) {
+        uint16_t seg = (uint16_t)(base >> 4);
+        for (int s = 0; s < 6; s++) load_seg(c, s, seg);
+        c->rip = entry - base;
+        c->r[RSP] = stack - base;
+    } else {
+        editor_tables(pc);
+        c->gdtr.base = ESYS_GDT;
+        c->gdtr.limit = 4 * 8 - 1;
+        if (bits == 64) {
+            c->idtr.base = ESYS_IDT64;
+            c->idtr.limit = 256 * 16 - 1;
+            c->cr4 |= CR4_PAE;
+            c->cr3 = ESYS_PML4;
+            c->efer |= EFER_LME | EFER_LMA;
+            c->cr0 |= CR0_PE | CR0_PG;
+            load_seg(c, CS, 0x18);
+        } else {
+            c->idtr.base = ESYS_IDT32;
+            c->idtr.limit = 256 * 8 - 1;
+            c->cr0 |= CR0_PE;
+            load_seg(c, CS, 0x08);
+        }
+        for (int s = 0; s < 6; s++)
+            if (s != CS) load_seg(c, s, 0x10);
+        c->rip = entry;
+        c->r[RSP] = stack;
+    }
+    cpu_update_mode(c);
+    cpu_tlb_flush(c, 0);
+    c->rflags = 2; /* interrupts off */
+    c->wait_sipi = 0;
+    c->halted = 0;
+    m->view_cpu = i;
+    if (m->state != MS_WAIT_INPUT) m->state = MS_READY;
+    m->last_stop = STOP_NONE;
+    m->bits = machine_cpu(m)->bits;
+}
+
+/* An empty machine (no image, disk or kernel; the UI's editor fills it):
+ * the bootstrap processor waits with interrupts off. */
+static void park_bsp(PC *pc) {
+    CPU *c = &pc->m->cpu;
+    static const uint8_t park[] = {0xFA, 0xF4, 0xEB, 0xFD}; /* cli; hlt; jmp hlt */
+    machine_phys_poke(pc->m, 0xFFF80, park, sizeof park);
+    load_seg(c, CS, 0xF000);
+    c->rip = 0xFF80;
+    snprintf(pc->m->status, sizeof pc->m->status, "empty machine: write a program in the editor and load it onto a CPU");
+}
+
 int pc_load(Machine *m, char *err, size_t errn) {
     PC *pc = m->pc;
     CPU *c = &m->cpu;
@@ -1587,6 +1750,7 @@ int pc_load(Machine *m, char *err, size_t errn) {
 
     int r;
     if (m->pc_kernel) r = bios_boot_linux(pc, err, errn);
+    else if (!m->nfiles && !pc->hda.present && !pc->fda.present) park_bsp(pc), r = 0;
     else if (!m->nfiles) r = bios_boot_disk(pc, err, errn);
     else {
         r = pc_load_image(m, err, errn);

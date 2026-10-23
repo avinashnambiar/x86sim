@@ -82,6 +82,7 @@ static void free_program_state(Machine *m) {
 
 void machine_destroy(Machine *m) {
     free_program_state(m);
+    asm_forget(m);
     buf_free(&m->out);
     buf_free(&m->in);
     for (int i = 0; i < m->nfiles; i++) free(m->files[i]);
@@ -122,7 +123,9 @@ int machine_reset(Machine *m, char *err, size_t errn) {
     snprintf(m->status, sizeof m->status, "ready");
     if (m->pc_mode) {
         m->pc = pc_create(m);
-        return pc_load(m, err, errn);
+        if (pc_load(m, err, errn)) return -1;
+        asm_replay(m); /* editor programs restart with the machine */
+        return 0;
     }
     if (load_program(m, err, errn)) return -1;
     os_install(m);
@@ -214,8 +217,9 @@ static int pc_round(Machine *m) {
         if (idle == 2 && m->yield_on_idle) return STOP_LIMIT;
         if (idle) return STOP_NONE;
         m->state = MS_HALTED;
-        snprintf(m->status, sizeof m->status, "halted at 0x%llx with interrupts disabled",
-                 (unsigned long long)m->cpu.rip);
+        if (m->ncpu > 1) snprintf(m->status, sizeof m->status, "all CPUs halted with interrupts disabled");
+        else snprintf(m->status, sizeof m->status, "halted at 0x%llx with interrupts disabled",
+                      (unsigned long long)m->cpu.rip);
         return STOP_HALT;
     }
     return STOP_NONE;

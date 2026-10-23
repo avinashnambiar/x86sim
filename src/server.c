@@ -369,6 +369,72 @@ static void json_cache_stats(Buf *b, Cache *c) {
     buf_printf(b, "]}");
 }
 
+/* The contents of one cache (unit= core * 2 + kind, 4095 = L2): sets set= to
+ * set + n - 1, each way as 0 (invalid) or [state, line address, LRU age];
+ * occ: one character per set of the whole cache ('a' + valid ways, upper
+ * case when one is dirty); sel=set,way adds that line's bytes next to the
+ * bytes in memory (they differ where the copy is dirty). */
+static void api_error(Buf *b, const char *msg);
+
+static void api_cachelines(Machine *m, const char *q, Buf *b) {
+    CacheSys *s = m->cache;
+    if (!s) {
+        buf_printf(b, "{\"enabled\":false}");
+        return;
+    }
+    int unit = (int)query_u64(q, "unit", (uint64_t)m->view_cpu * 2);
+    Cache *c = cache_unit(s, unit);
+    if (!c) return api_error(b, "no such cache");
+    uint64_t set0 = query_u64(q, "set", 0), n = query_u64(q, "n", 64);
+    if (set0 >= (uint64_t)c->sets) set0 = 0;
+    if (n > (uint64_t)c->sets - set0) n = (uint64_t)c->sets - set0;
+    buf_printf(b, "{\"enabled\":true,\"unit\":%d,\"name\":\"%s\",\"sets\":%d,\"ways\":%d,\"set0\":%llu,\"rows\":[",
+               unit, c->name, c->sets, c->ways, (unsigned long long)set0);
+    for (uint64_t i = set0; i < set0 + n; i++) {
+        CacheLine *set = c->lines + i * (uint64_t)c->ways;
+        buf_append(b, i > set0 ? ",[" : "[", i > set0 ? 2 : 1);
+        for (int w = 0; w < c->ways; w++) {
+            CacheLine *l = &set[w];
+            if (w) buf_append(b, ",", 1);
+            if (l->state == MESI_I) buf_append(b, "0", 1);
+            else buf_printf(b, "[%d,\"%llx\",%u]", l->state, (unsigned long long)(l->tag << 6), c->clock - l->lru);
+        }
+        buf_append(b, "]", 1);
+    }
+    buf_printf(b, "],\"occ\":\"");
+    for (int i = 0; i < c->sets; i++) {
+        int valid = 0, dirty = 0;
+        for (int w = 0; w < c->ways; w++) {
+            int st = c->lines[i * c->ways + w].state;
+            valid += st != MESI_I;
+            dirty |= st == MESI_M;
+        }
+        char ch = (char)((dirty ? 'A' : 'a') + valid);
+        buf_append(b, &ch, 1);
+    }
+    buf_append(b, "\"", 1);
+    char v[64];
+    unsigned sset, sway;
+    if (query_get(q, "sel", v, sizeof v) && sscanf(v, "%u,%u", &sset, &sway) == 2 && sset < (unsigned)c->sets &&
+        sway < (unsigned)c->ways) {
+        CacheLine *l = &c->lines[(uint64_t)sset * (uint64_t)c->ways + sway];
+        buf_printf(b, ",\"sel\":{\"set\":%u,\"way\":%u,\"state\":%d", sset, sway, l->state);
+        if (l->state != MESI_I) {
+            uint8_t mem[CACHE_LINE];
+            size_t got = mem_peek(s->mem, l->tag << 6, mem, CACHE_LINE);
+            if (got < CACHE_LINE) memset(mem + got, 0xFF, CACHE_LINE - got);
+            buf_printf(b, ",\"addr\":\"%llx\",\"age\":%u,\"data\":\"", (unsigned long long)(l->tag << 6),
+                       c->clock - l->lru);
+            for (int i = 0; i < CACHE_LINE; i++) buf_printf(b, "%02x", l->data[i]);
+            buf_printf(b, "\",\"mem\":\"");
+            for (int i = 0; i < CACHE_LINE; i++) buf_printf(b, "%02x", mem[i]);
+            buf_append(b, "\"", 1);
+        }
+        buf_append(b, "}", 1);
+    }
+    buf_append(b, "}", 1);
+}
+
 /* Cache statistics, the states of one line (addr= physical) and recent coherence events. */
 static void api_cache(Machine *m, const char *q, Buf *b) {
     CacheSys *s = m->cache;
@@ -457,6 +523,7 @@ static void handle_api(Machine *m, const char *method, const char *path, const c
     if (!strcmp(path, "/api/symbols")) return api_symbols(m, b);
     if (!strcmp(path, "/api/screen")) return pc_screen(m, b);
     if (!strcmp(path, "/api/cache")) return api_cache(m, q, b);
+    if (!strcmp(path, "/api/cachelines")) return api_cachelines(m, q, b);
     if (!post) return api_error(b, "unknown endpoint or method");
 
     if (!strcmp(path, "/api/step")) {
@@ -504,6 +571,74 @@ static void handle_api(Machine *m, const char *method, const char *path, const c
         machine_destroy(m);
         *m = fresh;
         machine_rebind(m);
+    } else if (!strcmp(path, "/api/newpc")) {
+        /* an empty PC with smp= CPUs (cache=1: simulated caches) for the editor */
+        char err[512];
+        uint64_t smp = query_u64(q, "smp", (uint64_t)(m->pc ? m->ncpu : 1));
+        if (smp < 1 || smp > MAX_CPUS) return api_error(b, "smp= must be 1 to 255");
+        Machine fresh;
+        machine_init(&fresh);
+        fresh.echo_output = 0;
+        fresh.use_host_stdin = 0;
+        fresh.yield_on_idle = 1;
+        fresh.pc_mode = 1;
+        fresh.pc_ram_mb = m->pc_ram_mb;
+        fresh.pc_smp = (int)smp;
+        fresh.pc_cache = (int)query_u64(q, "cache", (uint64_t)m->pc_cache) != 0;
+        char *av[1] = {"pc"};
+        if (machine_load(&fresh, 0, NULL, 1, av, 0, err, sizeof err)) {
+            machine_destroy(&fresh);
+            return api_error(b, err);
+        }
+        machine_destroy(m);
+        *m = fresh;
+        machine_rebind(m);
+    } else if (!strcmp(path, "/api/asm")) {
+        /* body: assembly source; bits=16|32|64, syntax=att|intel, cpu=N (-1: memory only), addr=hex;
+         * check=1 only assembles */
+        static char diag[16384];
+        char bits[8] = "64", syntax[8] = "att", cpu[8] = "0", addr[32] = "";
+        query_get(q, "bits", bits, sizeof bits);
+        query_get(q, "syntax", syntax, sizeof syntax);
+        query_get(q, "cpu", cpu, sizeof cpu);
+        if (query_u64(q, "check", 0)) { /* assemble only */
+            int bad = asm_check(body, bodylen, atoi(bits), !strcmp(syntax, "intel"), diag, sizeof diag);
+            buf_printf(b, bad ? "{\"error\":\"assembly failed\",\"diagnostics\":" : "{\"ok\":true,\"warnings\":");
+            json_str(b, diag);
+            buf_append(b, "}", 1);
+            return;
+        }
+        if (!query_get(q, "addr", addr, sizeof addr) || !addr[0]) return api_error(b, "addr= is required");
+        AsmLoad info;
+        if (asm_load(m, body, bodylen, atoi(bits), !strcmp(syntax, "intel"), atoi(cpu), strtoull(addr, NULL, 16), &info,
+                     diag, sizeof diag)) {
+            buf_printf(b, "{\"error\":\"%s\",\"diagnostics\":", strstr(diag, "program.s:") ? "assembly failed" : "load failed");
+            json_str(b, diag);
+            buf_append(b, "}", 1);
+            return;
+        }
+        const Symbol *s = machine_find_symbol(m, info.bits == 16 ? info.entry - info.addr : info.entry);
+        if (info.cpu >= 0)
+            snprintf(m->status, sizeof m->status, "cpu%d: %llu bytes loaded at 0x%llx, %d-bit, ready to run", info.cpu,
+                     (unsigned long long)info.size, (unsigned long long)info.addr, info.bits);
+        else
+            snprintf(m->status, sizeof m->status, "%llu bytes loaded at 0x%llx", (unsigned long long)info.size,
+                     (unsigned long long)info.addr);
+        buf_printf(b, "{\"asm\":{\"cpu\":%d,\"bits\":%d,\"size\":%llu,\"addr\":", info.cpu, info.bits,
+                   (unsigned long long)info.size);
+        json_hex(b, info.addr);
+        buf_printf(b, ",\"entry\":");
+        json_hex(b, info.entry);
+        buf_printf(b, ",\"stack\":");
+        json_hex(b, info.stack);
+        buf_printf(b, ",\"entry_name\":");
+        json_str(b, s && s->addr == (info.bits == 16 ? info.entry - info.addr : info.entry) ? s->name : "");
+        buf_printf(b, ",\"warnings\":");
+        json_str(b, diag);
+        buf_printf(b, "},\"state\":");
+        api_state(m, b);
+        buf_append(b, "}", 1);
+        return;
     } else if (!strcmp(path, "/api/break")) {
         uint64_t addr;
         if (!query_get(q, "addr", v, sizeof v) || !machine_parse_addr(m, v, &addr))
@@ -556,6 +691,7 @@ static const char *mime_type(const char *path) {
     if (!dot) return "application/octet-stream";
     if (!strcmp(dot, ".html")) return "text/html; charset=utf-8";
     if (!strcmp(dot, ".js")) return "text/javascript; charset=utf-8";
+    if (!strcmp(dot, ".s")) return "text/plain; charset=utf-8";
     if (!strcmp(dot, ".css")) return "text/css; charset=utf-8";
     if (!strcmp(dot, ".svg")) return "image/svg+xml";
     if (!strcmp(dot, ".png")) return "image/png";
@@ -585,7 +721,9 @@ static void respond(int fd, int code, const char *type, const void *body, size_t
 
 static void serve_file(int fd, const char *ui_dir, const char *path) {
     if (!strcmp(path, "/")) path = "/index.html";
-    for (const char *p = path + 1; *p; p++)
+    /* flat names, plus the editor's examples in asm/ */
+    const char *name = !strncmp(path, "/asm/", 5) ? path + 5 : path + 1;
+    for (const char *p = name; *p; p++)
         if (!isalnum((unsigned char)*p) && *p != '.' && *p != '-' && *p != '_') {
             respond(fd, 404, "text/plain", "not found", 9);
             return;

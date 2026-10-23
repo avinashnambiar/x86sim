@@ -24,7 +24,8 @@ static void usage(void) {
             "  (loaded as a 16-bit DOS .COM program).\n"
             "\n"
             "options:\n"
-            "  -u, --ui          start the web UI debugger (http://127.0.0.1:8086)\n"
+            "  -u, --ui          start the web UI debugger (http://127.0.0.1:8086); with no\n"
+            "                    program, an empty PC to fill from its assembly editor\n"
             "  -d, --debug       start the terminal debugger\n"
             "  -p, --port N      web UI port (default 8086)\n"
             "  -b, --bits N      force 16, 32 or 64-bit mode\n"
@@ -319,8 +320,11 @@ int main(int argc, char **argv) {
         else if (nfiles < 64) files[nfiles++] = argv[i];
     }
     if (!nfiles && !hda && !fda && !kernel) {
-        usage();
-        return 2;
+        if (!ui) {
+            usage();
+            return 2;
+        }
+        pc = 1; /* web UI without a program: an empty PC for the editor */
     }
     if (smp < 1 || smp > MAX_CPUS) {
         fprintf(stderr, "--smp must be 1 to %d\n", MAX_CPUS);

@@ -32,14 +32,49 @@
   <main class="layout">
     <section class="panel disasm-panel">
       <div class="panel-head">
-        <h2>Disassembly</h2>
+        <div class="view-tabs" role="tablist" aria-label="Main view">
+          <button class="view-tab on" data-view="disasm" role="tab" aria-selected="true">Disassembly</button>
+          <button class="view-tab" data-view="editor" role="tab" aria-selected="false" title="Write an assembly program and load it onto a CPU">Editor</button>
+        </div>
         <span id="where" class="where"></span>
-        <div class="head-tools">
+        <div class="head-tools" id="disasm-tools">
           <input id="goto" placeholder="address or symbol" spellcheck="false" aria-label="Go to address">
           <button id="btn-follow" class="toggle on" title="Keep RIP in view">Follow RIP</button>
         </div>
       </div>
       <div id="disasm" class="disasm scroll" tabindex="0"></div>
+      <div id="editor" class="editor hidden">
+        <div class="ed-bar">
+          <select id="ed-template" aria-label="Example programs"><option value="">Examples…</option></select>
+          <label>Mode <select id="ed-bits">
+            <option value="16">16-bit real</option>
+            <option value="32">32-bit protected</option>
+            <option value="64" selected>64-bit long</option>
+          </select></label>
+          <label>Syntax <select id="ed-syntax"><option value="att">AT&amp;T</option><option value="intel">Intel</option></select></label>
+          <label>Load on <select id="ed-cpu"></select></label>
+          <label>at <input id="ed-addr" spellcheck="false" autocomplete="off" aria-label="Load address (hex)" title="Physical load address (hex). Each CPU has a default slot; edit to choose your own."></label>
+          <span class="ed-actions">
+            <button id="ed-check" title="Assemble and report errors without loading">Assemble</button>
+            <button id="ed-load" title="Load onto the CPU, ready to step">Load</button>
+            <button id="ed-run" class="primary" title="Load and run (Ctrl+Enter)">Load &amp; Run</button>
+          </span>
+        </div>
+        <div class="ed-main">
+          <pre id="ed-gutter" class="ed-gutter" aria-hidden="true"></pre>
+          <textarea id="ed-src" class="ed-src" spellcheck="false" wrap="off" autocapitalize="off" autocomplete="off" aria-label="Assembly source"></textarea>
+        </div>
+        <div id="ed-msg" class="ed-msg hidden" role="status"></div>
+        <div class="ed-foot">
+          <span id="ed-info" class="ed-info"></span>
+          <span class="ed-machine">
+            New machine:
+            <input id="ed-ncpu" type="number" min="1" max="255" value="2" aria-label="Number of CPUs"> CPUs
+            <label><input type="checkbox" id="ed-cache"> caches</label>
+            <button id="ed-new" title="Replace the machine with an empty PC (memory cleared)">Create</button>
+          </span>
+        </div>
+      </div>
     </section>
 
     <section class="side">
@@ -114,6 +149,31 @@
             </form>
             <div id="line-view" class="line-view muted">Enter an address to see which caches hold its line and in what MESI state.</div>
           </div>
+        </div>
+        <h3 class="cache-h">Contents</h3>
+        <div class="cc-bar">
+          <select id="cc-unit" aria-label="Cache shown"></select>
+          <span class="cc-pager hidden" id="cc-pager">
+            <button id="cc-prev" title="Previous sets" aria-label="Previous sets">&lsaquo;</button>
+            <span id="cc-range"></span>
+            <button id="cc-next" title="Next sets" aria-label="Next sets">&rsaquo;</button>
+          </span>
+          <label class="cc-check"><input type="checkbox" id="cc-hide" checked> hide empty sets</label>
+          <label class="cc-check" for="cc-speed">while running</label>
+          <select id="cc-speed" aria-label="Instructions between refreshes while running" title="Instructions executed between refreshes while the program runs and this tab is open">
+            <option value="0">full speed</option>
+            <option value="100000">100k instr / frame</option>
+            <option value="10000">10k instr / frame</option>
+            <option value="1000">1k instr / frame</option>
+            <option value="100">100 instr / frame</option>
+            <option value="10">10 instr / frame</option>
+          </select>
+          <span class="cc-legend"><i class="st-m"></i>M <i class="st-e"></i>E <i class="st-s"></i>S <i class="cc-mru-key"></i>most recent <i class="cc-lru-key"></i>next victim <i class="cc-chg-key"></i>changed</span>
+        </div>
+        <canvas id="cc-map" class="cc-map hidden" height="64" title="Every set of the cache: brighter = more valid ways, red = holds a dirty line. Click to jump."></canvas>
+        <div class="cc-body">
+          <div class="cc-wrap"><table class="cc-grid" id="cc-grid"></table></div>
+          <div id="cc-sel" class="cc-sel muted">Click a line to see its bytes.</div>
         </div>
         <h3 class="cache-h">Coherence events <span id="cache-events" class="count"></span></h3>
         <div id="cache-log" class="list"></div>

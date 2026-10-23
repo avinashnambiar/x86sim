@@ -401,6 +401,11 @@ void cache_flush_all(CacheSys *s) {
     log_event(s, BUS_FLUSH, CACHE_UNIT_L2, 0, MESI_I);
 }
 
+Cache *cache_unit(CacheSys *s, int unit) {
+    if (unit == CACHE_UNIT_L2) return &s->l2;
+    return unit >= 0 && unit < nunits(s) ? unit_cache(s, unit) : NULL;
+}
+
 int cache_unit_state(CacheSys *s, int unit, uint64_t pa) {
     if (unit != CACHE_UNIT_L2 && (unit < 0 || unit >= nunits(s))) return MESI_I;
     CacheLine *l = find(unit == CACHE_UNIT_L2 ? &s->l2 : unit_cache(s, unit), pa >> 6);

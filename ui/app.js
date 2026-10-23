@@ -18,6 +18,7 @@ const S = {
   symbols: null,
   resumeOnInput: false,
   announced: '',
+  cc: { unit: null, set0: 0, sel: null, prev: null, prevKey: '', speed: 0, names: '' }, // cache contents view
 };
 
 const GPR16 = ['ax', 'bx', 'cx', 'dx', 'si', 'di', 'bp', 'sp'];
@@ -213,11 +214,210 @@ async function renderCache() {
   }
   $('cache-events').textContent = `(${num(res.events)})`;
   $('cache-log').innerHTML = res.log.length ? res.log.map((x) => `<div>${esc(x)}</div>`).join('') : '<div class="muted">no bus traffic yet</div>';
-  const body = $('tab-cache');
-  if (S.cacheStick !== false) $('cache-log').lastElementChild?.scrollIntoView({ block: 'nearest' });
-  void body;
+  const log = $('cache-log'); /* its own scroll box, pinned to the newest event unless scrolled up */
+  if (S.cacheStick !== false) log.scrollTop = log.scrollHeight;
+  await renderContents(res.caches);
 }
+$('cache-log').addEventListener('scroll', (e) => {
+  const l = e.currentTarget;
+  S.cacheStick = l.scrollTop + l.clientHeight >= l.scrollHeight - 4;
+});
 $('line-form').addEventListener('submit', (e) => { e.preventDefault(); renderTab(); });
+
+/* ---------- cache contents: sets x ways of one cache, refreshed while running ---------- */
+
+const CC_PAGE = 64;                  // sets per page (all of an L1, 1/64 of the L2)
+const CC_L2 = 4095;                  // unit number of the L2
+const MESI_CHAR = ['I', 'S', 'E', 'M'];
+
+/* caches from /api/cache are ordered cpu0 L1D, cpu0 L1I, cpu1 L1D, ..., L2 */
+const ccUnitOf = (i, n) => (i === n - 1 ? CC_L2 : i);
+
+async function renderContents(caches) {
+  const cc = S.cc;
+  const names = caches.map((c) => c.name).join('|');
+  const pick = $('cc-unit');
+  if (names !== cc.names) {
+    cc.names = names;
+    pick.innerHTML = caches.map((c, i) => `<option value="${ccUnitOf(i, caches.length)}">${esc(c.name)}</option>`).join('');
+  }
+  const unit = cc.unit ?? (S.st ? S.st.view_cpu * 2 : 0); // follows the shown CPU until a cache is picked
+  pick.value = String(unit);
+  if (cc.set0 === null) { /* a newly picked cache opens on its first page holding a line */
+    const o = await api(`/api/cachelines?unit=${unit}&n=0`);
+    if (!o.enabled) return;
+    cc.occ = o.occ;
+    cc.set0 = ccPageWith(0, 1) ?? 0;
+  }
+  const sel = cc.sel && cc.sel.unit === unit ? `&sel=${cc.sel.set},${cc.sel.way}` : '';
+  const res = await api(`/api/cachelines?unit=${unit}&set=${cc.set0}&n=${CC_PAGE}${sel}`);
+  if (!res.enabled) return;
+  cc.set0 = res.set0;
+  cc.sets = res.sets;
+  cc.occ = res.occ;
+
+  const paged = res.sets > CC_PAGE;
+  $('cc-pager').classList.toggle('hidden', !paged);
+  $('cc-map').classList.toggle('hidden', !paged);
+  if (paged) {
+    $('cc-range').textContent = `sets ${res.set0}–${res.set0 + res.rows.length - 1} of ${res.sets}`;
+    const hide = $('cc-hide').checked;
+    $('cc-prev').disabled = hide ? ccPageWith(res.set0 - CC_PAGE, -1) === null : res.set0 === 0;
+    $('cc-next').disabled = hide ? ccPageWith(res.set0 + CC_PAGE, 1) === null : res.set0 + CC_PAGE >= res.sets;
+    drawCacheMap(res);
+  }
+
+  /* cells that changed since the last refresh of this same page flash */
+  const key = `${unit}:${res.set0}`;
+  const prev = cc.prevKey === key ? cc.prev : null;
+  const now = new Map();
+  const hide = $('cc-hide').checked;
+  let html = `<tr><th>set</th>${Array.from({ length: res.ways }, (_, w) => `<th>way ${w}</th>`).join('')}</tr>`;
+  let shown = 0;
+  res.rows.forEach((row, r) => {
+    const set = res.set0 + r;
+    const valid = row.filter(Boolean);
+    if (hide && !valid.length) return;
+    shown++;
+    let mru = -1, lru = -1;
+    row.forEach((c, w) => {
+      if (!c) return;
+      if (mru < 0 || c[2] < row[mru][2]) mru = w;
+      if (lru < 0 || c[2] > row[lru][2]) lru = w;
+    });
+    if (valid.length < res.ways) lru = -1; // a free way is filled before anything is evicted
+    html += `<tr><th>${set}</th>`;
+    row.forEach((c, w) => {
+      const id = `${set}:${w}`;
+      const v = c ? `${c[0]}${c[1]}` : '';
+      now.set(id, v);
+      const changed = prev && prev.get(id) !== undefined && prev.get(id) !== v;
+      const picked = cc.sel && cc.sel.unit === unit && cc.sel.set === set && cc.sel.way === w;
+      if (!c) {
+        html += `<td class="cc-cell cc-empty${changed ? ' chg' : ''}${picked ? ' sel' : ''}" data-set="${set}" data-way="${w}"></td>`;
+        return;
+      }
+      const st = MESI_CHAR[c[0]];
+      const cls = `cc-cell cc-${st.toLowerCase()}${w === mru ? ' mru' : ''}${w === lru ? ' lru' : ''}${changed ? ' chg' : ''}${picked ? ' sel' : ''}`;
+      html += `<td class="${cls}" data-set="${set}" data-way="${w}" title="set ${set}, way ${w}: line 0x${c[1]}, ${st}, used ${num(c[2])} accesses ago${w === lru ? ' (next victim)' : ''}">${c[1]}</td>`;
+    });
+    html += '</tr>';
+  });
+  if (!shown) html += `<tr><td class="muted" colspan="${res.ways + 1}">no valid lines in these sets</td></tr>`;
+  $('cc-grid').innerHTML = html;
+  cc.prev = now;
+  cc.prevKey = key;
+  renderLineBytes(res);
+}
+
+/* first page at or after page start (dir 1) / before it (dir -1) holding a valid line */
+function ccPageWith(start, dir) {
+  const occ = S.cc.occ || '';
+  for (let p = start; p >= 0 && p < occ.length; p += dir * CC_PAGE)
+    if (/[^aA]/.test(occ.slice(p, p + CC_PAGE))) return p;
+  return null;
+}
+function ccStep(dir) {
+  const cc = S.cc;
+  const next = cc.set0 + dir * CC_PAGE;
+  if (next < 0 || next >= (cc.sets || 0)) return;
+  cc.set0 = $('cc-hide').checked ? (ccPageWith(next, dir) ?? cc.set0) : next; /* skip empty pages when hiding them */
+  renderTab();
+}
+
+/* the picked line: its bytes in this cache, marked where they differ from memory */
+function renderLineBytes(res) {
+  const box = $('cc-sel');
+  const sel = res.sel;
+  if (!sel) {
+    box.className = 'cc-sel muted';
+    box.textContent = 'Click a line to see its bytes.';
+    return;
+  }
+  box.className = 'cc-sel';
+  if (!sel.state) {
+    box.innerHTML = `<div class="muted">${esc(res.name)} set ${sel.set}, way ${sel.way} is empty (never filled, evicted or invalidated).</div>`;
+    return;
+  }
+  const st = MESI_CHAR[sel.state];
+  let dirty = 0, dump = '';
+  for (let row = 0; row < 4; row++) {
+    let hexs = '', text = '';
+    for (let i = row * 16; i < row * 16 + 16; i++) {
+      const b = sel.data.substr(i * 2, 2);
+      const diff = b !== sel.mem.substr(i * 2, 2);
+      dirty += diff;
+      const ch = parseInt(b, 16);
+      hexs += `<span${diff ? ' class="cc-diff"' : ''}>${b}</span>${i % 16 === 7 ? '  ' : ' '}`;
+      text += ch >= 32 && ch < 127 ? esc(String.fromCharCode(ch)) : '.';
+    }
+    dump += `<span class="muted">+${hex(row * 16, 2)}</span>  ${hexs} <span class="muted">${text}</span>\n`;
+  }
+  box.innerHTML = `<div class="cc-sel-head"><span class="state ${MESI_CLASS[st]}">${st}</span> <b>0x${esc(sel.addr)}</b> <span class="muted">${esc(res.name)} · set ${sel.set} · way ${sel.way} · used ${num(sel.age)} accesses ago</span> <button id="cc-all">Show in every cache</button></div>` +
+    `<pre class="cc-dump">${dump}</pre>` +
+    `<div class="muted">${dirty ? `${dirty} highlighted byte${dirty === 1 ? '' : 's'} differ from main memory: written, not yet written back.` : 'Same bytes as main memory.'}</div>`;
+}
+
+/* overview of every set: brightness = valid ways, red = holds a dirty line */
+function drawCacheMap(res) {
+  const cv = $('cc-map');
+  const cols = 128, rows = Math.ceil(res.sets / cols);
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 600, h = rows * 4;
+  cv.style.height = h + 'px';
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  const g = cv.getContext('2d');
+  g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const color = { e: css.getPropertyValue('--st-e').trim(), m: css.getPropertyValue('--st-m').trim(), bg: css.getPropertyValue('--panel-2').trim(), edge: css.getPropertyValue('--text').trim() };
+  const cw = w / cols, ch = h / rows;
+  g.fillStyle = color.bg;
+  g.fillRect(0, 0, w, h);
+  for (let i = 0; i < res.occ.length; i++) {
+    const c = res.occ.charCodeAt(i);
+    const dirty = c < 97;
+    const n = c - (dirty ? 65 : 97);
+    if (!n) continue;
+    g.globalAlpha = 0.5 + 0.5 * n / res.ways;
+    g.fillStyle = dirty ? color.m : color.e;
+    g.fillRect((i % cols) * cw, Math.floor(i / cols) * ch, Math.max(cw - 0.5, 1), Math.max(ch - 0.5, 1));
+  }
+  g.globalAlpha = 1;
+  g.strokeStyle = color.edge;
+  g.lineWidth = 1;
+  const p0 = res.set0;
+  g.strokeRect((p0 % cols) * cw + 0.5, Math.floor(p0 / cols) * ch + 0.5, CC_PAGE * cw - 1, ch - 1);
+}
+
+$('cc-map').addEventListener('click', (e) => {
+  const cv = e.currentTarget, r = cv.getBoundingClientRect();
+  const cols = 128, rows = Math.ceil(S.cc.sets / cols);
+  const set = Math.floor((e.clientY - r.top) / (r.height / rows)) * cols + Math.floor((e.clientX - r.left) / (r.width / cols));
+  S.cc.set0 = Math.max(0, Math.floor(set / CC_PAGE) * CC_PAGE);
+  renderTab();
+});
+$('cc-unit').addEventListener('change', (e) => {
+  S.cc.unit = Number(e.target.value);
+  S.cc.set0 = null;
+  S.cc.sel = null;
+  renderTab();
+});
+$('cc-prev').addEventListener('click', () => ccStep(-1));
+$('cc-next').addEventListener('click', () => ccStep(1));
+$('cc-hide').addEventListener('change', () => renderTab());
+$('cc-speed').addEventListener('change', (e) => { S.cc.speed = Number(e.target.value); });
+$('cc-grid').addEventListener('click', (e) => {
+  const td = e.target.closest('[data-way]');
+  if (!td) return;
+  S.cc.sel = { unit: S.cc.unit ?? (S.st ? S.st.view_cpu * 2 : 0), set: Number(td.dataset.set), way: Number(td.dataset.way) };
+  renderTab();
+});
+$('cc-sel').addEventListener('click', (e) => {
+  if (e.target.id !== 'cc-all') return;
+  $('line-addr').value = e.target.closest('.cc-sel').querySelector('b').textContent;
+  renderTab();
+});
 
 function fmtValue(v, digits) {
   const s = hex(v, digits);
@@ -540,6 +740,7 @@ async function refresh(st) {
   }
   renderHeader(S.st);
   renderRegs(S.st);
+  renderEditorMachine(S.st);
   await Promise.all([renderDisasm(), renderStack(), renderMem(), renderOutput(S.st), renderTab()]);
 }
 
@@ -572,10 +773,15 @@ async function runLoop() {
   try {
     renderHeader(S.st);
     for (;;) {
-      st = await post('/api/continue');
+      const slice = S.tab === 'cache' ? S.cc.speed : 0; // slow motion for watching the caches
+      st = await post('/api/continue' + (slice ? '?max=' + slice : ''));
       S.st = st;
       renderHeader(st);
       await renderOutput(st);
+      if (S.tab === 'cache' && (slice || Date.now() - (S.cacheAt || 0) > 250)) {
+        S.cacheAt = Date.now();
+        await renderCache().catch(() => {}); // a missed frame must not stop the run
+      }
       if (S.tab === 'screen' && Date.now() - (S.screenAt || 0) > 100) {
         S.screenAt = Date.now();
         await renderScreen();
@@ -804,4 +1010,275 @@ document.addEventListener('keydown', (e) => {
 
 window.addEventListener('resize', () => { clearTimeout(S.resizeTimer); S.resizeTimer = setTimeout(renderMem, 150); });
 
-refresh().catch((e) => toast('Cannot reach x86sim: ' + e.message));
+/* ---------- assembly editor: write a program, load it onto a CPU ---------- */
+
+const ED_TEMPLATES = [
+  { file: 'hello64.s', name: 'Hello, long mode (64-bit)', bits: 64, syntax: 'att' },
+  { file: 'hello64-intel.s', name: 'Hello, long mode, Intel syntax', bits: 64, syntax: 'intel' },
+  { file: 'hello32.s', name: 'Hello, protected mode (32-bit)', bits: 32, syntax: 'att' },
+  { file: 'hello16.s', name: 'Hello, real mode (16-bit, BIOS)', bits: 16, syntax: 'att' },
+  { file: 'whoami64.s', name: 'Which CPU am I? (load on several)', bits: 64, syntax: 'att' },
+  { file: 'counter64.s', name: 'Shared counter with LOCK (load on several)', bits: 64, syntax: 'att' },
+  { file: 'fault32.s', name: 'Exceptions: divide by zero', bits: 32, syntax: 'att' },
+];
+const ED_KEY = 'x86sim.editor';
+const ED = { addrEdited: false, errors: new Map(), ncpu: 0, pristine: '' };
+
+const store = {
+  get() { try { return JSON.parse(localStorage.getItem(ED_KEY)) || null; } catch { return null; } },
+  set(v) { try { localStorage.setItem(ED_KEY, JSON.stringify(v)); } catch { /* private mode: no draft */ } },
+};
+
+/* default slot of a CPU: code at the bottom, stack at the top (see pc.h) */
+function edDefaultAddr(cpu, bits) {
+  if (cpu < 0) return bits === 16 ? 0x8000 : 0x2000000;
+  return bits === 16 ? 0x10000 + cpu * 0x1000 : 0x200000 + cpu * 0x10000;
+}
+const edCpu = () => Number($('ed-cpu').value);
+const edBits = () => Number($('ed-bits').value);
+function edSetDefaultAddr() {
+  if (!ED.addrEdited) $('ed-addr').value = hex(edDefaultAddr(edCpu(), edBits()));
+}
+
+function edSave() {
+  store.set({ src: $('ed-src').value, bits: edBits(), syntax: $('ed-syntax').value });
+}
+
+/* line numbers, with diagnostics marked */
+function edGutter() {
+  const n = $('ed-src').value.split('\n').length;
+  let html = '';
+  for (let i = 1; i <= n; i++) {
+    const e = ED.errors.get(i);
+    html += e ? `<span class="${e.kind}" title="${esc(e.msg)}">${i}</span>\n` : `${i}\n`;
+  }
+  $('ed-gutter').innerHTML = html;
+  $('ed-gutter').scrollTop = $('ed-src').scrollTop;
+}
+
+function edGotoLine(line, col) {
+  const ta = $('ed-src');
+  const lines = ta.value.split('\n');
+  let pos = 0;
+  for (let i = 0; i < line - 1 && i < lines.length; i++) pos += lines[i].length + 1;
+  const len = (lines[line - 1] || '').length;
+  ta.focus();
+  ta.setSelectionRange(pos + Math.min((col || 1) - 1, len), pos + len);
+  const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+  ta.scrollTop = Math.max(0, (line - 4) * lh);
+}
+
+/* clang output: "program.s:LINE:COL: error: message" followed by the source line and a caret */
+function edShowDiagnostics(text, failed) {
+  ED.errors.clear();
+  const box = $('ed-msg');
+  const blocks = [];
+  let cur = null;
+  for (const l of (text || '').split('\n')) {
+    const m = l.match(/^program\.s:(\d+):(\d+): (error|warning|note): (.*)$/);
+    if (m) {
+      cur = { line: +m[1], col: +m[2], kind: m[3], msg: m[4], ctx: [] };
+      blocks.push(cur);
+      if (m[3] !== 'note' && !(ED.errors.get(cur.line)?.kind === 'error')) ED.errors.set(cur.line, cur);
+    } else if (cur && l.trim()) cur.ctx.push(l);
+    else if (!cur && l.trim()) blocks.push({ msg: l });
+  }
+  edGutter();
+  if (!blocks.length) {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  box.classList.toggle('bad', !!failed);
+  box.innerHTML = blocks.map((b) => b.line
+    ? `<div class="ed-diag ${b.kind}"><button class="link" data-line="${b.line}" data-col="${b.col}">line ${b.line}</button> <b>${b.kind}:</b> ${esc(b.msg)}${b.ctx.length ? `<pre>${esc(b.ctx.join('\n'))}</pre>` : ''}</div>`
+    : `<div class="ed-diag">${esc(b.msg)}</div>`).join('');
+}
+
+function edInfo(text) { $('ed-info').textContent = text; }
+
+/* CPU choices follow the machine; the default is the CPU being viewed */
+function renderEditorMachine(st) {
+  const n = st && st.cpus ? st.cpus.length : 1;
+  const sel = $('ed-cpu');
+  if (n !== ED.ncpu) {
+    const keep = sel.value;
+    ED.ncpu = n;
+    sel.innerHTML = Array.from({ length: n }, (_, i) => `<option value="${i}">cpu${i}</option>`).join('') +
+      '<option value="-1">memory only</option>';
+    sel.value = keep !== '' && Number(keep) < n ? keep : String(st ? st.view_cpu || 0 : 0);
+    edSetDefaultAddr();
+    $('ed-ncpu').value = n;
+  }
+  $('ed-cache').checked = !!(st && st.cache);
+  if (st && st.os !== 'pc') edInfo('This machine runs a user-mode program; programs from the editor need a PC: create one below.');
+}
+
+async function edPost(params) {
+  const q = new URLSearchParams({
+    bits: edBits(), syntax: $('ed-syntax').value, cpu: edCpu(), addr: $('ed-addr').value.trim().replace(/^0x/i, ''), ...params,
+  });
+  const r = await fetch('/api/asm?' + q, { method: 'POST', body: $('ed-src').value });
+  return r.json();
+}
+
+async function edAssemble(mode) { /* 'check' | 'load' | 'run' */
+  edSave();
+  if (mode !== 'check' && !/^(0x)?[0-9a-f]+$/i.test($('ed-addr').value.trim())) {
+    toast('The load address must be a hex number');
+    $('ed-addr').focus();
+    return;
+  }
+  for (const id of ['ed-check', 'ed-load', 'ed-run']) $(id).disabled = true;
+  try {
+    const res = await edPost(mode === 'check' ? { check: 1 } : {});
+    if (res.error) {
+      edShowDiagnostics(res.diagnostics || res.error, true);
+      edInfo(res.error === 'assembly failed' ? 'Assembly failed: see the messages above.' : res.diagnostics || res.error);
+      if (res.error !== 'assembly failed') toast(res.diagnostics || res.error);
+      return;
+    }
+    edShowDiagnostics(res.warnings, false);
+    if (mode === 'check') {
+      edInfo('Assembled without errors.');
+      return;
+    }
+    const a = res.asm;
+    const where = a.cpu < 0 ? 'into memory' : `on cpu${a.cpu}`;
+    const modeName = { 16: '16-bit real mode', 32: '32-bit protected mode', 64: '64-bit long mode' }[a.bits];
+    edInfo(`Loaded ${num(a.size)} bytes at ${a.addr} ${where} · ${modeName}` +
+      (a.cpu < 0 ? '' : ` · entry ${a.entry_name || a.entry} · stack top ${a.stack}`));
+    S.symbols = null;
+    if (S.running) return; /* the run picks the new CPU up on its next slice */
+    S.follow = true;
+    $('btn-follow').classList.add('on');
+    S.prev = null;
+    await refresh(res.state);
+    if (mode === 'run' && a.cpu >= 0) runLoop();
+    else if (a.cpu >= 0) setView('disasm'); /* ready to step */
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    for (const id of ['ed-check', 'ed-load', 'ed-run']) $(id).disabled = false;
+  }
+}
+
+async function edNewMachine() {
+  const n = Math.max(1, Math.min(255, Number($('ed-ncpu').value) || 1));
+  if (S.running) S.pause = true;
+  try {
+    const st = await post(`/api/newpc?smp=${n}&cache=${$('ed-cache').checked ? 1 : 0}`);
+    S.symbols = null;
+    S.prev = null;
+    S.outLen = 0;
+    ED.ncpu = 0;
+    await refresh(st);
+    edInfo(`New machine: ${n} CPU${n === 1 ? '' : 's'}${st.cache ? ', caches on' : ''}, memory cleared.`);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function edLoadTemplate(t) {
+  const ta = $('ed-src');
+  if (ta.value.trim() && ta.value !== ED.pristine && !confirm('Replace the program in the editor with this example?')) return;
+  try {
+    const r = await fetch('asm/' + t.file);
+    if (!r.ok) throw new Error(`cannot load ${t.file}`);
+    ta.value = await r.text();
+    ED.pristine = ta.value;
+    $('ed-bits').value = String(t.bits);
+    $('ed-syntax').value = t.syntax;
+    edSetDefaultAddr();
+    edShowDiagnostics('', false);
+    edInfo(`Example: ${t.name}.`);
+    edSave();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function setView(v) {
+  document.querySelectorAll('.view-tab').forEach((b) => {
+    const on = b.dataset.view === v;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', on);
+  });
+  $('disasm').classList.toggle('hidden', v !== 'disasm');
+  $('disasm-tools').classList.toggle('hidden', v !== 'disasm');
+  $('where').classList.toggle('hidden', v !== 'disasm');
+  $('editor').classList.toggle('hidden', v !== 'editor');
+  try { localStorage.setItem('x86sim.view', v); } catch { /* ignore */ }
+  if (v === 'editor') edGutter();
+}
+
+document.querySelectorAll('.view-tab').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
+$('ed-template').innerHTML += ED_TEMPLATES.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join('');
+$('ed-template').addEventListener('change', (e) => {
+  const t = ED_TEMPLATES[Number(e.target.value)];
+  e.target.value = '';
+  if (t) edLoadTemplate(t);
+});
+$('ed-cpu').addEventListener('change', edSetDefaultAddr);
+$('ed-bits').addEventListener('change', () => { edSetDefaultAddr(); edSave(); });
+$('ed-syntax').addEventListener('change', edSave);
+$('ed-addr').addEventListener('input', () => { ED.addrEdited = $('ed-addr').value.trim() !== ''; });
+$('ed-check').addEventListener('click', () => edAssemble('check'));
+$('ed-load').addEventListener('click', () => edAssemble('load'));
+$('ed-run').addEventListener('click', () => edAssemble('run'));
+$('ed-new').addEventListener('click', edNewMachine);
+$('ed-msg').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-line]');
+  if (b) edGotoLine(Number(b.dataset.line), Number(b.dataset.col));
+});
+$('ed-src').addEventListener('input', () => {
+  if (ED.errors.size) ED.errors.clear();
+  edGutter();
+  clearTimeout(ED.saveTimer);
+  ED.saveTimer = setTimeout(edSave, 400);
+});
+$('ed-src').addEventListener('scroll', () => { $('ed-gutter').scrollTop = $('ed-src').scrollTop; });
+$('ed-src').addEventListener('keydown', (e) => {
+  const ta = e.currentTarget;
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    edAssemble('run');
+  } else if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault(); /* indent; Esc then Tab leaves the editor */
+    if (ED.escaped) { ED.escaped = false; $('ed-check').focus(); return; }
+    ta.setRangeText('    ', ta.selectionStart, ta.selectionEnd, 'end');
+    ta.dispatchEvent(new Event('input'));
+  } else if (e.key === 'Enter' && !e.shiftKey) {
+    /* keep the indentation of the line above */
+    const before = ta.value.slice(0, ta.selectionStart);
+    const indent = before.slice(before.lastIndexOf('\n') + 1).match(/^[ \t]*/)[0];
+    if (indent) {
+      e.preventDefault();
+      ta.setRangeText('\n' + indent, ta.selectionStart, ta.selectionEnd, 'end');
+      ta.dispatchEvent(new Event('input'));
+    }
+  }
+  ED.escaped = e.key === 'Escape';
+});
+
+/* restore the draft, or start with the first example */
+(async () => {
+  const saved = store.get();
+  if (saved && typeof saved.src === 'string') {
+    $('ed-src').value = saved.src;
+    ED.pristine = saved.src;
+    if ([16, 32, 64].includes(saved.bits)) $('ed-bits').value = String(saved.bits);
+    if (['att', 'intel'].includes(saved.syntax)) $('ed-syntax').value = saved.syntax;
+  } else {
+    await edLoadTemplate(ED_TEMPLATES[0]);
+  }
+  edGutter();
+  let v = null;
+  try { v = localStorage.getItem('x86sim.view'); } catch { /* ignore */ }
+  setView(v === 'editor' ? 'editor' : 'disasm');
+})();
+
+refresh().then(() => {
+  /* an empty machine has nothing to disassemble yet: open the editor */
+  if (S.st && /^empty machine/.test(S.st.status)) setView('editor');
+}).catch((e) => toast('Cannot reach x86sim: ' + e.message));

@@ -492,11 +492,18 @@ static int sec_class(const Shdr *h) {
     return 1;
 }
 
-static int link_objects(Machine *m, Elf *objs, int n, char *err, size_t errn) {
+/* Link objects into one image. base is the address the code is linked for
+ * (LINK_DEFAULT: the mode's usual one); in PC mode the image is written to
+ * physical base + phys_delta (a real-mode program linked for offset 0 and
+ * loaded into its own segment). *size_out receives the image size. */
+#define LINK_DEFAULT UINT64_MAX
+static int link_objects(Machine *m, Elf *objs, int n, uint64_t base, uint64_t phys_delta, uint64_t *size_out,
+                        char *err, size_t errn) {
     Linker L = {.m = m, .objs = objs, .nobjs = n, .err = err, .errn = errn};
     int bits = m->bits_override ? m->bits_override : (objs[0].is64 ? 64 : 32);
     int pc = m->pc_mode, real = bits == 16 || pc;
     L.base = pc ? 0x7C00 : real ? 0x100 : bits == 64 ? 0x400000 : 0x08048000;
+    if (base != LINK_DEFAULT) L.base = base;
     uint64_t seg_base = pc ? 0 : real ? 0x10000 : 0; /* load segment 0x1000 in real mode */
 
     for (int i = 0; i < n; i++) {
@@ -659,7 +666,7 @@ static int link_objects(Machine *m, Elf *objs, int n, char *err, size_t errn) {
 
     /* Map memory */
     if (pc) {
-        mem_poke(m->mem, L.base, L.img, L.img_size);
+        machine_phys_poke(m, L.base + phys_delta, L.img, L.img_size); /* coherent with the caches */
     } else if (real) {
         mem_map(m->mem, 0, 0x110000, MEM_R | MEM_W | MEM_X, "conventional memory");
         mem_poke(m->mem, seg_base + L.base, L.img, L.img_size);
@@ -689,6 +696,7 @@ static int link_objects(Machine *m, Elf *objs, int n, char *err, size_t errn) {
     sort_symbols(m);
 
     m->brk_start = m->brk_cur = ALIGN_UP(end, PAGE);
+    if (size_out) *size_out = L.img_size;
     free(L.img);
     free(L.globals);
     return bits;
@@ -743,7 +751,7 @@ int pc_load_image(Machine *m, char *err, size_t errn) {
             goto out;
         }
     }
-    if (link_objects(m, objs, m->nfiles, err, errn) < 0) goto out;
+    if (link_objects(m, objs, m->nfiles, LINK_DEFAULT, 0, NULL, err, errn) < 0) goto out;
     rc = 0;
 out:
     for (int i = 0; i < m->nfiles; i++) {
@@ -823,7 +831,7 @@ int load_program(Machine *m, char *err, size_t errn) {
             snprintf(err, errn, "%s: expected a relocatable object (.o)", objs[i].path);
             goto out;
         }
-    int bits = link_objects(m, objs, m->nfiles, err, errn);
+    int bits = link_objects(m, objs, m->nfiles, LINK_DEFAULT, 0, NULL, err, errn);
     if (bits < 0) goto out;
     if (bits == 16) {
         setup_dos(m);
@@ -844,4 +852,72 @@ out:
     }
     free(objs);
     return rc;
+}
+
+/* ---- PC mode: one relocatable object (from the UI's assembler) linked at an address ---- */
+
+int pc_link_object(Machine *m, const uint8_t *data, size_t size, uint64_t base, uint64_t phys, uint64_t *entry,
+                   uint64_t *img_size, char *err, size_t errn) {
+    Elf obj = {.path = "program.o"};
+    obj.data = malloc(size ? size : 1);
+    memcpy(obj.data, data, size);
+    obj.size = size;
+    int rc = -1, before = m->nsyms;
+    uint64_t old_entry = m->entry, old_brk = m->brk_start, old_cur = m->brk_cur;
+    if (!is_elf(obj.data, obj.size) || parse_elf(&obj, err, errn)) {
+        if (!err[0]) snprintf(err, errn, "the assembler did not produce an ELF object");
+        goto out;
+    }
+    if (obj.type != ET_REL) {
+        snprintf(err, errn, "expected a relocatable object");
+        goto out;
+    }
+    if (link_objects(m, &obj, 1, base, phys - base, img_size, err, errn) < 0) goto out;
+    *entry = m->entry;
+    /* labels of whatever was loaded here before are stale now */
+    int k = 0;
+    for (int i = 0; i < m->nsyms; i++) {
+        if (i < before && m->syms[i].addr >= base && m->syms[i].addr < base + *img_size) {
+            free(m->syms[i].name);
+            continue;
+        }
+        m->syms[k++] = m->syms[i];
+    }
+    m->nsyms = k;
+    sort_symbols(m);
+    rc = 0;
+out:
+    m->entry = old_entry;
+    m->brk_start = old_brk;
+    m->brk_cur = old_cur;
+    free(obj.data);
+    free(obj.sh);
+    free(obj.ph);
+    free(obj.secaddr);
+    return rc;
+}
+
+/* Upper bound of the image pc_link_object would build (sections, alignment, GOT). */
+uint64_t pc_object_size(const uint8_t *data, size_t size) {
+    Elf e = {.path = "program.o"};
+    char err[128] = "";
+    uint64_t total = 0;
+    e.data = malloc(size ? size : 1);
+    memcpy(e.data, data, size);
+    e.size = size;
+    if (is_elf(e.data, e.size) && !parse_elf(&e, err, sizeof err)) {
+        for (int j = 1; j < e.nsh; j++) {
+            Shdr *h = &e.sh[j];
+            if (sec_class(h) < 0) continue;
+            total = ALIGN_UP(total, h->align ? h->align : 1) + h->size;
+            if (h->type == SHT_RELA || h->type == SHT_REL) total += h->size; /* GOT slots, generously */
+        }
+        for (int j = 1; j < e.nsh; j++)
+            if (e.sh[j].type == SHT_RELA || e.sh[j].type == SHT_REL) total += e.sh[j].size;
+        total += 64;
+    }
+    free(e.data);
+    free(e.sh);
+    free(e.ph);
+    return total;
 }

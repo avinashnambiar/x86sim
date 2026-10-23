@@ -3,7 +3,7 @@ CFLAGS  ?= -O2 -g
 CFLAGS  += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
 CFLAGS  += -DUI_DIR='"$(CURDIR)/ui"'
 
-SRCS := src/mem.c src/decode.c src/disasm.c src/cpu.c src/sse.c src/fpu.c src/softfloat.c src/mmu.c src/system.c src/pc.c src/apic.c src/bios.c src/cet.c src/cache.c src/machine.c src/loader.c src/os.c src/server.c src/main.c
+SRCS := src/mem.c src/decode.c src/disasm.c src/cpu.c src/sse.c src/fpu.c src/softfloat.c src/mmu.c src/system.c src/pc.c src/apic.c src/bios.c src/cet.c src/cache.c src/machine.c src/loader.c src/asm.c src/os.c src/server.c src/main.c
 OBJS := $(SRCS:src/%.c=build/%.o)
 
 x86sim: $(OBJS)

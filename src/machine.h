@@ -71,6 +71,8 @@ typedef struct Machine {
     int pc_boot;                    /* boot drive: 'a', 'c' or 0 (hard disk, then floppy) */
     int pc_console;                 /* keystrokes come from the host terminal */
     int yield_on_idle;              /* web UI: end a run chunk when the guest idles */
+    struct AsmLoad *asm_loads;      /* programs loaded from the UI's editor (asm.c) */
+    int nasm_loads;
     int pc_smp;                     /* --smp: number of CPUs (1-MAX_CPUS) */
     int pc_cache;                   /* --cache: simulate L1/L2 caches with MESI coherence */
     struct CacheSys *cache;
@@ -147,6 +149,28 @@ void machine_log(Machine *m, const char *fmt, ...) __attribute__((format(printf,
 
 /* loader.c */
 int load_program(Machine *m, char *err, size_t errn);
+/* PC mode: link a relocatable object for address base and write it to
+ * physical address phys; returns the entry point (_start or the start of
+ * the code) and the image size. */
+int pc_link_object(Machine *m, const uint8_t *data, size_t size, uint64_t base, uint64_t phys, uint64_t *entry,
+                   uint64_t *img_size, char *err, size_t errn);
+uint64_t pc_object_size(const uint8_t *data, size_t size);
+
+/* asm.c: programs written in the web UI. Assemble (clang) and load at addr,
+ * then start CPU cpu in that mode (cpu < 0: only write memory). Returns 0,
+ * or -1 with clang's diagnostics or the reason in diag. Loads are remembered
+ * and replayed after a machine reset. */
+typedef struct AsmLoad {
+    int cpu, bits;
+    uint64_t addr, entry, size, stack;
+    uint8_t *obj;
+    size_t objn;
+} AsmLoad;
+int asm_load(Machine *m, const char *src, size_t n, int bits, int intel, int cpu, uint64_t addr, AsmLoad *info,
+             char *diag, size_t diagn);
+int asm_check(const char *src, size_t n, int bits, int intel, char *diag, size_t diagn); /* assemble only */
+void asm_replay(Machine *m);
+void asm_forget(Machine *m);
 /* os.c */
 void os_install(Machine *m);
 

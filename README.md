@@ -15,6 +15,8 @@ make test                  # differential test suite (needs Rosetta on Apple Sil
 ./x86cc --ui  tests/c/algo.c            # ...or open it in the web debugger
 ./x86cc --run --16 examples/hello16.s   # 16-bit real-mode DOS program
 
+./x86sim -u --smp 4 --cache   # empty 4-CPU PC: write assembly in the browser, load it on any CPU
+
 ./x86sim --kernel bzImage --initrd initrd.cpio          # boot Linux on the serial console
 ./x86sim --smp 2 --cache-stats --kernel bzImage ...     # two CPUs, L1/L2 caches, MESI
 ```
@@ -74,10 +76,54 @@ byte to port 0xF4 exits with that code.
   switcher** (registers, disassembly, stack and memory follow the selected CPU;
   buttons up to 8 CPUs, a drop-down with a running/halted summary beyond)
   and, with `--cache`, a **Caches** tab: hit rates, MESI line counts per
-  cache, bus traffic, the state of any line in every cache, and a live log of
-  coherence events.
+  cache, bus traffic, the state of any line in every cache, a live log of
+  coherence events, and the **contents** of any cache: a sets × ways grid
+  of line addresses coloured by MESI state, marking each set's most recently
+  used line and its next victim and flashing lines that just changed. It
+  refreshes while the program runs, optionally in slow motion (10 to 100k
+  instructions per frame). The L2 adds an overview map of all 4096 sets.
+  Clicking a line shows its 64 bytes, highlighting bytes that differ from
+  main memory, i.e. written but not yet written back.
 
 The server binds to 127.0.0.1 only.
+
+## Assembly editor
+
+The disassembly panel has an **Editor** view for writing bare-metal programs
+and loading them onto any CPU of a PC machine. `x86sim -u` without a program
+(add `--smp N`, `--cache`) starts an empty PC and opens the editor; **New
+machine** in the editor replaces the current machine with an empty one of any
+size.
+
+- Choose the **mode** (16-bit real, 32-bit protected, 64-bit long), the
+  **syntax** (AT&T, or Intel via `.intel_syntax noprefix`), the **CPU** and
+  the load address, then **Load** (ready to step, in the disassembly view)
+  or **Load & Run** (Ctrl+Enter). **Assemble** only checks for errors, which
+  are marked in the gutter; click one to jump to it.
+- Programs are assembled by `clang` (the toolchain the project already uses;
+  set `X86SIM_CLANG` to use another) and linked by the simulator's own linker.
+  Entry is `_start`, or the first instruction.
+- Every CPU has a default slot, with code at the bottom and the stack at the
+  top: 32/64-bit at 0x200000 + cpu × 64 KiB, 16-bit at 0x10000 + cpu × 4 KiB.
+  The CPU starts directly in the chosen mode, with interrupts off:
+  - 16-bit real mode: CS = DS = ES = SS = address / 16, BIOS services available.
+  - 32-bit protected mode: flat segments (code 0x08, data 0x10).
+  - 64-bit long mode: code segment 0x18, the first 4 GiB identity-mapped
+    with 2 MiB pages.
+  - The GDT, IDTs and page tables live at 0x100000–0x10FFFF.
+- Until a program installs its own IDT, an exception stops the run with a
+  report such as `cpu1: unhandled #UD invalid opcode at 0x210004` and halts
+  only that CPU.
+- Port 0xE9 prints to the Console; the CPUs share memory, so programs on
+  different CPUs can communicate. `cli; hlt` stops a CPU, and the run ends
+  when every CPU has stopped.
+- **Memory only** writes the code without starting a CPU, for example as the
+  target of your own INIT/STARTUP IPIs.
+- Reset restarts the machine and reloads every editor program. The draft is
+  kept in the browser.
+- Examples: hello in each mode and in Intel syntax, "which CPU am I?",
+  a shared counter with `LOCK` and a spinlock (load it on several CPUs and
+  watch the line in the Caches tab), and an exception.
 
 ## Multiprocessor and caches
 
@@ -186,6 +232,8 @@ edge-case values and compares every architecturally defined flag.
   floppy boot, CET, SMP bring-up with IPIs and shared counters, the MESI
   transitions of one line (`smpcache`), and 32 CPUs started at once
   (`smpmany`).
+- `tests/asm/run.sh` — the assembly editor's API: every example in each
+  mode, multi-CPU loads, reset replay, diagnostics and refused addresses.
 - `tests/softfloat/run.sh` — x87 arithmetic and transcendentals against
   reference results.
 - `tests/linux/run.sh` — boots Alpine's Linux 6.6 kernel (downloaded once) on
