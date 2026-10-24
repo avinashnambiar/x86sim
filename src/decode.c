@@ -580,6 +580,14 @@ have_def:;
                 p += disp_size;
             }
         }
+        if ((def.f & F_GRP) && def.grp == G11 && ((m >> 3) & 7)) { /* C6/C7: only /0 (MOV) and F8 */
+            if (m != 0xF8) {
+                in->len = (uint8_t)p;
+                return DEC_INVALID;
+            }
+            OpDef t = in->opcode == 0xC6 ? (OpDef)OP1(XABORT, Ib, 0) : (OpDef)OP1(XBEGIN, Jz, 0);
+            def = t;
+        }
         if (def.f & F_GRP) {
             OpDef g = groups[def.grp][in->mod == 3][(m >> 3) & 7];
             if (!g.id) {

@@ -1,0 +1,8 @@
+cpuid x2apic 00000001 
+x2apic id, ldr, version, mmio read 00000000 00000001 00060014 00000000 
+#gp: bad mode switch, read-only id, no dfr 00000003 
+aps up through the x2apic icr 0000000e 
+self, physical, logical, broadcast ipis per cpu 00000002 00000002 00000002 00000002 
+vt-d version, ecap qi/ir/eim, qi wait status, queue head 00000010 0000001a 600df00d 00000010 
+ioapic: compat blocked, remapped to id 3, compat with cfi 00000000 00000001 00000001 
+bye

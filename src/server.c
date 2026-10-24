@@ -114,7 +114,7 @@ static void api_state(Machine *m, Buf *b) {
                (unsigned long long)c->icount, m->exit_code);
     json_hex(b, c->rip);
     if (c->sys) {
-        const char *mode = !(c->cr0 & CR0_PE) ? "real" : (c->rflags & FL_VM) ? "vm86"
+        const char *mode = c->smm ? "smm" : !(c->cr0 & CR0_PE) ? "real" : (c->rflags & FL_VM) ? "vm86"
                          : c->bits == 64 ? "long" : (c->efer & EFER_LMA) ? "compat" : "protected";
         buf_printf(b, ",\"sys\":{\"mode\":\"%s\",\"cpl\":%d,\"paging\":%s,\"time_ns\":%llu", mode, c->cpl,
                    (c->cr0 & CR0_PG) ? "true" : "false", (unsigned long long)pc_time_ns(m));

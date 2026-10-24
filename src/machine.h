@@ -75,6 +75,7 @@ typedef struct Machine {
     int nasm_loads;
     int pc_smp;                     /* --smp: number of CPUs (1-MAX_CPUS) */
     int pc_cache;                   /* --cache: simulate L1/L2 caches with MESI coherence */
+    int tx_live;                    /* RTM transactions in progress on any CPU */
     struct CacheSys *cache;
     uint64_t cycles;                /* PC mode: instruction rounds (the virtual clock) */
 

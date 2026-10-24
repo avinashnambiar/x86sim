@@ -80,8 +80,11 @@ void cpu_update_mode(CPU *c) {
 void cpu_reset_system(CPU *c) {
     Mem *m = c->mem;
     ICache *ic = c->icache;
+    struct Tx *tx = c->tx;
+    tx_reset(c);
     memset(c, 0, sizeof *c);
     c->mem = m;
+    c->tx = tx;
     if (!ic) ic = malloc(sizeof *ic);
     memset(ic, 0, sizeof *ic);
     c->icache = ic;
@@ -89,6 +92,7 @@ void cpu_reset_system(CPU *c) {
     c->a20_mask = ~0ULL;
     c->rflags = 2;
     c->rip = 0xFFF0;
+    c->smbase = 0x30000;
     c->cr0 = CR0_ET | CR0_CD | CR0_NW;
     c->mxcsr = 0x1F80;
     c->fpu.fcw = 0x0040;
@@ -918,9 +922,9 @@ static int uncore_msr(uint32_t idx) {
 }
 
 int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v) {
-    int err;
-    if (c->msr_hook && c->msr_hook(c, idx, v, 0)) return 0;
-    if (pmu_msr(c, idx, v, 0, &err)) return err ? -1 : 0;
+    int err, h;
+    if (c->msr_hook && (h = c->msr_hook(c, idx, v, 0))) return h < 0 ? -1 : 0;
+    if (pmu_msr(c, idx, v, 0, &err) || smm_msr(c, idx, v, 0, &err)) return err ? -1 : 0;
     switch (idx) {
     case 0x10: *v = read_tsc(c); return 0;
     case 0x1B: *v = c->msr.apic_base; return 0;
@@ -931,7 +935,7 @@ int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v) {
     case 0x8B: *v = 0xF0ULL << 32; return 0; /* microcode revision (new enough for errata checks) */
     case 0xCE: *v = 0; return 0; /* platform info */
     case 0xE7: case 0xE8: *v = read_tsc(c); return 0; /* MPERF / APERF */
-    case 0xFE: *v = 0x508; return 0; /* MTRRCAP: 8 variable, fixed, WC */
+    case 0xFE: *v = 0x908; return 0; /* MTRRCAP: 8 variable, fixed, WC, SMRR */
     case 0x174: *v = c->msr.sysenter_cs; return 0;
     case 0x175: *v = c->msr.sysenter_esp; return 0;
     case 0x176: *v = c->msr.sysenter_eip; return 0;
@@ -966,9 +970,9 @@ int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v) {
 }
 
 int sys_wrmsr(CPU *c, uint32_t idx, uint64_t v) {
-    int err;
-    if (c->msr_hook && c->msr_hook(c, idx, &v, 1)) return 0;
-    if (pmu_msr(c, idx, &v, 1, &err)) return err ? -1 : 0;
+    int err, h;
+    if (c->msr_hook && (h = c->msr_hook(c, idx, &v, 1))) return h < 0 ? -1 : 0;
+    if (pmu_msr(c, idx, &v, 1, &err) || smm_msr(c, idx, &v, 1, &err)) return err ? -1 : 0;
     switch (idx) {
     case 0x10: c->tsc_offset = v - (c->read_tsc ? c->read_tsc(c) : c->icount); return 0;
     case 0x1B: c->msr.apic_base = v; return 0;
@@ -1140,8 +1144,18 @@ static int contributory(int v) { return v == EXC_DE || (v >= EXC_TS && v <= EXC_
 
 StepResult sys_step(CPU *c) {
     if (_setjmp(c->jb)) {
+        if (c->tx_jump) { /* a transaction aborted mid-instruction: continue at its fallback */
+            c->tx_jump = 0;
+            c->snap_valid = 0;
+            return STEP_OK;
+        }
         if (c->exc_unimpl) return STEP_EXCEPTION;
         if (c->snap_valid) sys_restore(c);
+        if (tx_active(c)) { /* exceptions abort transactions and are not delivered */
+            tx_abort(c, c->exc_vector == EXC_DB || c->exc_vector == EXC_BP ? 0x10 : 0);
+            c->dbg_hits = 0;
+            return STEP_OK;
+        }
         int vec = c->exc_vector;
         uint64_t code = c->exc_code;
         if (c->delivering >= 0) {
@@ -1169,9 +1183,19 @@ StepResult sys_step(CPU *c) {
         return STEP_OK;
     }
 
+    if (c->tx && tx_doomed(c)) { /* another CPU touched our transaction's lines */
+        tx_abort(c, tx_doomed(c));
+        return STEP_OK;
+    }
+    if (c->smi_pending && !c->smm && !c->wait_sipi) { /* SMI: above NMI and interrupts */
+        tx_abort(c, 0);
+        smm_enter(c);
+        return STEP_OK;
+    }
     int shadow = c->intr_shadow;
     c->intr_shadow = 0;
     if (c->nmi_pending && !c->nmi_blocked && !shadow) {
+        tx_abort(c, 0);
         c->nmi_pending = 0;
         c->nmi_blocked = 1;
         c->halted = 0;
@@ -1185,6 +1209,7 @@ StepResult sys_step(CPU *c) {
     if (c->irq_line && (c->rflags & FL_IF) && !shadow && c->get_interrupt) {
         int v = c->get_interrupt(c);
         if (v >= 0) {
+            tx_abort(c, 0); /* interrupts abort a transaction, then arrive at its fallback */
             c->halted = 0;
             c->delivering = 0x100; /* external: benign for double-fault purposes */
             int ocpl = c->cpl;
@@ -1239,6 +1264,10 @@ StepResult sys_step(CPU *c) {
         }
     }
     const Insn *inp = ip;
+    if (c->tx && tx_active(c) && tx_forbidden(inp)) {
+        tx_abort(c, 0);
+        return STEP_OK;
+    }
     if (c->ibt_wait) cet_check_endbr(c, inp);
     int old_cpl = c->cpl;
 
@@ -1260,7 +1289,10 @@ StepResult sys_step(CPU *c) {
     if (c->pmu.watch) pmu_retire(c, inp, old_cpl);
     if (!c->rf_keep) c->rflags &= ~FL_RF;
 
-    if (tf || c->dbg_hits) {
+    if ((tf || c->dbg_hits) && tx_active(c)) { /* debug traps abort a transaction */
+        tx_abort(c, 0x10);
+        c->dbg_hits = 0;
+    } else if (tf || c->dbg_hits) {
         c->dr[6] = (c->dr[6] & ~0xFULL) | c->dbg_hits | (tf ? 0x4000 : 0);
         c->dbg_hits = 0;
         c->delivering = EXC_DB;
@@ -1577,9 +1609,18 @@ void exec_system(CPU *c, const Insn *in) {
             return;
         case 0xE8: /* SERIALIZE */
             return;
+        case 0xD5: /* XEND */
+            tx_end(c);
+            return;
+        case 0xD6: /* XTEST */
+            tx_xtest(c);
+            return;
         }
         fault(c, EXC_UD, 0);
-    case I_RSM: case I_UD0: case I_UD1:
+    case I_RSM:
+        smm_rsm(c);
+        return;
+    case I_UD0: case I_UD1:
         fault(c, EXC_UD, 0);
     }
     unimplemented(c, in);

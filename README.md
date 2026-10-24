@@ -203,9 +203,12 @@ src/mmu.c         paging (32-bit, PAE, 4/5-level), PCID TLB, SMEP/SMAP/PKU,
 src/cet.c         CET shadow stacks and indirect branch tracking
 src/cache.[ch]    L1/L2 cache hierarchy with MESI coherence
 src/pmu.c         performance counters (architectural perfmon v4), RDPMC, PMIs
+src/tsx.c         restricted transactional memory (XBEGIN/XEND/XABORT/XTEST)
+src/smm.c         system management mode: SMI entry, SMRAM save state, RSM, SMRR
 src/pc.c          PC machine: clock, 8259 PIC, 8254 PIT, CMOS/RTC, 8042, 16550,
                   VGA, PCI, IDE; SMP bring-up
-src/apic.c        local APICs (timer, IPIs) and the I/O APIC
+src/apic.c        local APICs (xAPIC and x2APIC: timer, IPIs) and the I/O APIC
+src/iommu.c       VT-d remapping unit: interrupt remapping, queued invalidation
 src/bios.c        HLE BIOS services, ACPI/MP tables, disk and Linux boot
 src/mem.[ch]      sparse 64-bit paged memory with R/W/X protection, lazy pages
 src/machine.[ch]  machine = CPU + memory + program + debugger state (breakpoints,
@@ -237,8 +240,14 @@ edge-case values and compares every architecturally defined flag.
   floppy boot, CET, SMP bring-up with IPIs and shared counters, the MESI
   transitions of one line (`smpcache`), 32 CPUs started at once
   (`smpmany`), the performance counters with an overflow interrupt
-  (`pmu`), and self- and cross-modifying code with and without the caches
-  (`smc`, `smcnocache`).
+  (`pmu`), self- and cross-modifying code with and without the caches
+  (`smc`, `smcnocache`), and transactional memory: commit, every abort
+  cause, conflicts and isolation between CPUs, lock elision (`tsx`), and
+  system management mode: SMIs from paged protected mode, SMBASE
+  relocation, SMRR protection, an SMI IPI to a halted CPU (`smm`), and
+  x2APIC with VT-d interrupt remapping: MSR interface, 32-bit physical,
+  cluster and broadcast IPIs, queued invalidation, remapped and blocked
+  I/O APIC interrupts (`x2apic`).
 - `tests/asm/run.sh` — the assembly editor's API: every example in each
   mode, multi-CPU loads, reset replay, diagnostics and refused addresses
   (including overlapping programs).
@@ -246,7 +255,8 @@ edge-case values and compares every architecturally defined flag.
   reference results.
 - `tests/linux/run.sh` — boots Alpine's Linux 6.6 kernel (downloaded once) on
   one CPU, on two CPUs, and on two and eight CPUs with the caches; types a line into
-  `/init` and checks the echo and the clean reboot.
+  `/init` and checks the echo, the clean reboot, and that Linux switched to
+  x2APIC mode through interrupt remapping.
 
 ## Status
 
@@ -264,6 +274,21 @@ Implemented:
   with `--cache` L1D/L1I/L2 misses and cross-core modified-line transfers.
   The simulator models behavior, not microarchitecture: there is no branch
   predictor or pipeline timing, and the LBR MSRs hold values but record nothing
+- TSX RTM (PC mode): stores are buffered per cache line until XEND commits;
+  another CPU touching the lines, exceptions, interrupts, capacity (512
+  lines), nesting past 7, or I/O/CPUID/system instructions abort with the
+  architectural status in EAX. HLE prefixes are ignored (HLE not reported)
+- SMM (PC mode): SMIs from port 0xB2 (to the writing CPU) or APIC/IPI
+  delivery mode SMI; Intel 64 save-state map at SMBASE + 0xFE00, big-real
+  entry at SMBASE + 0x8000, RSM with SMBASE relocation and auto-HALT
+  restart, IA32_SMBASE, MSR_SMI_COUNT, and SMRRs hiding SMRAM outside SMM.
+  The firmware installs no SMI handler: a program that raises SMIs brings
+  its own
+- x2APIC (MSR interface, 32-bit IDs, cluster logical mode, self IPI) and a
+  VT-d remapping unit described by an ACPI DMAR table: interrupt remapping
+  with extended (x2APIC) destinations, queued invalidation, compatibility-
+  format blocking. Linux boots in x2APIC mode through it. DMA translation is
+  accepted but not applied (no device does bus-master DMA)
 - A PC that boots disks, floppies and Linux, with SMP (up to 255 CPUs) and a
   MESI cache hierarchy
 - Linux user mode (≈45 syscalls), DOS int 21h and BIOS services

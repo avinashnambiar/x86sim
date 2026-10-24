@@ -29,8 +29,7 @@ static uint16_t cur_pcid(CPU *c) { return (c->cr4 & CR4_PCIDE) ? (uint16_t)(c->c
 /* ---- physical memory: unmapped addresses read as all ones, writes are dropped ----
  * With the cache hierarchy simulated, RAM accesses go through this CPU's L1. */
 
-void phys_read(CPU *c, uint64_t pa, void *buf, int n) {
-    pa &= c->a20_mask;
+static void raw_read(CPU *c, uint64_t pa, void *buf, int n) {
     if (pa >= c->mmio_lo && pa < c->mmio_hi && c->on_mmio(c, pa, buf, n, 0)) return;
     if (c->cache) {
         cache_access(c->cache, c->index, CA_READ, pa, buf, n);
@@ -43,8 +42,7 @@ void phys_read(CPU *c, uint64_t pa, void *buf, int n) {
     }
 }
 
-void phys_write(CPU *c, uint64_t pa, const void *buf, int n) {
-    pa &= c->a20_mask;
+static void raw_write(CPU *c, uint64_t pa, const void *buf, int n) {
     if (pa >= c->mmio_lo && pa < c->mmio_hi && c->on_mmio(c, pa, (void *)buf, n, 1)) return;
     if (c->icache) icache_written(c, pa, (size_t)n);
     if (c->cache) {
@@ -58,25 +56,67 @@ void phys_write(CPU *c, uint64_t pa, const void *buf, int n) {
 }
 
 /* Instruction fetch: like phys_read, through the L1 instruction cache. */
+/* Loads and stores, through transactional memory when any transaction is
+ * live (a transaction touching device memory aborts). */
+void phys_read(CPU *c, uint64_t pa, void *buf, int n) {
+    pa &= c->a20_mask;
+    if (smrr_blocked(c, pa)) {
+        memset(buf, 0xFF, (size_t)n);
+        return;
+    }
+    if (c->tx_live && *c->tx_live) {
+        if (tx_active(c) && pa >= c->mmio_lo && pa < c->mmio_hi) {
+            tx_abort(c, 0);
+            c->tx_jump = 1;
+            _longjmp(c->jb, 1);
+        }
+        raw_read(c, pa, buf, n);
+        tx_read(c, pa, buf, n);
+        return;
+    }
+    raw_read(c, pa, buf, n);
+}
+
+void phys_write(CPU *c, uint64_t pa, const void *buf, int n) {
+    pa &= c->a20_mask;
+    if (smrr_blocked(c, pa)) return;
+    if (c->tx_live && *c->tx_live) {
+        if (tx_active(c) && pa >= c->mmio_lo && pa < c->mmio_hi) {
+            tx_abort(c, 0);
+            c->tx_jump = 1;
+            _longjmp(c->jb, 1);
+        }
+        if (tx_write(c, pa, buf, n)) return;
+    }
+    raw_write(c, pa, buf, n);
+}
+
+/* Page walks and their accessed/dirty updates are not transactional. */
+static void pt_raw_read(CPU *c, uint64_t pa, void *buf, int n) { raw_read(c, pa & c->a20_mask, buf, n); }
+
 void phys_fetch(CPU *c, uint64_t pa, void *buf, int n) {
     pa &= c->a20_mask;
+    if (smrr_blocked(c, pa)) {
+        memset(buf, 0xFF, (size_t)n);
+        return;
+    }
     if (c->cache && !(pa >= c->mmio_lo && pa < c->mmio_hi)) {
         cache_access(c->cache, c->index, CA_FETCH, pa, buf, n);
         return;
     }
-    phys_read(c, pa, buf, n);
+    raw_read(c, pa, buf, n);
 }
 
 static uint64_t pt_read(CPU *c, uint64_t pa, int size) {
     uint64_t v = 0;
-    phys_read(c, pa, &v, size);
+    pt_raw_read(c, pa, &v, size);
     return v;
 }
 
 static void pt_set_bits(CPU *c, uint64_t pa, int size, uint64_t old, uint64_t bits) {
     if ((old & bits) == bits) return;
     uint64_t v = old | bits;
-    phys_write(c, pa, &v, size);
+    raw_write(c, pa & c->a20_mask, &v, size);
 }
 
 /* ---- TLB maintenance ---- */

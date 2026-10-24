@@ -1,0 +1,6 @@
+smi from paged pmode: count, cr0 in smm, saved cr0, command, eax back, cr0 after 00000001 00000000 80000001 0000005a 00001234 80000001 
+after relocation: count, smbase 00000002 00060000 
+smrr: smram read outside smm, planted value ffffffff 00005555 
+smi ipi to halted ap: auto-halt flag, its smbase, resumed after hlt 00000001 00030000 00000002 
+smi count (bsp) 00000003 
+bye

@@ -121,6 +121,27 @@ int pmu_msr(CPU *c, uint32_t idx, uint64_t *v, int write, int *err);
 void pmu_count(CPU *c, int ev, uint64_t n, int cpl);
 void pmu_retire(CPU *c, const Insn *in, int cpl);
 int pmu_rdpmc(CPU *c, uint32_t idx, uint64_t *v);
+/* tsx.c: restricted transactional memory */
+int tx_active(const CPU *c);
+uint32_t tx_doomed(const CPU *c); /* abort status a conflict left, or 0 */
+void tx_begin(CPU *c, const Insn *in);
+void tx_end(CPU *c);
+void tx_xabort(CPU *c, uint8_t imm);
+void tx_xtest(CPU *c);
+void tx_abort(CPU *c, uint32_t status);
+int tx_forbidden(const Insn *in);
+void tx_read(CPU *c, uint64_t pa, uint8_t *buf, int n);
+int tx_write(CPU *c, uint64_t pa, const uint8_t *buf, int n);
+void tx_reset(CPU *c);
+void tx_free(CPU *c);
+/* smm.c: system management mode */
+void smm_enter(CPU *c);
+void smm_rsm(CPU *c);
+int smm_msr(CPU *c, uint32_t idx, uint64_t *v, int write, int *err);
+/* SMRR: outside SMM the SMRAM range reads as all ones and ignores writes */
+static inline int smrr_blocked(const CPU *c, uint64_t pa) {
+    return (c->smrr_mask & 0x800) && !c->smm && ((pa ^ c->smrr_base) & c->smrr_mask & 0xFFFFF000ULL) == 0;
+}
 void sys_write_cr(CPU *c, int n, uint64_t v);
 uint64_t sys_read_cr(CPU *c, int n);
 void sys_write_dr(CPU *c, int n, uint64_t v);

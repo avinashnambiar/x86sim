@@ -774,8 +774,9 @@ static void mp_table(PC *pc) {
     poke8(pc, MPTABLE + 10, checksum(pc, MPTABLE, 16));
 }
 
-/* ACPI: RSDP -> RSDT -> MADT (local APIC, I/O APIC, IRQ 0 -> GSI 2, LINT1 NMI) */
-#define ACPI_BASE 0xF4000u /* RSDP; RSDT at +0x100, MADT (~2.1 KiB with 255 CPUs) at +0x200 */
+/* ACPI: RSDP -> RSDT -> MADT (local APIC, I/O APIC, IRQ 0 -> GSI 2, LINT1 NMI)
+ *                    -> DMAR (one VT-d unit for everything, interrupt remapping) */
+#define ACPI_BASE 0xF4000u /* RSDP; RSDT at +0x100, MADT (~2.1 KiB with 255 CPUs) at +0x200, DMAR at +0xC00 */
 
 static void acpi_header(uint8_t *t, const char *sig, uint32_t len) {
     memcpy(t, sig, 4);
@@ -789,7 +790,7 @@ static void acpi_header(uint8_t *t, const char *sig, uint32_t len) {
 }
 
 static void acpi_tables(PC *pc) {
-    const uint32_t rsdt = ACPI_BASE + 0x100, madt = ACPI_BASE + 0x200;
+    const uint32_t rsdt = ACPI_BASE + 0x100, madt = ACPI_BASE + 0x200, dmar = ACPI_BASE + 0xC00;
     static uint8_t m[44 + MAX_CPUS * 8 + 28];
     memset(m, 0, sizeof m);
     uint32_t n = 44, v;
@@ -812,11 +813,27 @@ static void acpi_tables(PC *pc) {
     poke(pc, madt, m, n);
     poke8(pc, madt + 9, checksum(pc, madt, (int)n));
 
-    uint8_t r[40] = {0};
-    acpi_header(r, "RSDT", 40);
+    /* DMAR: 48-bit host addresses, interrupt remapping; one DRHD covering all
+     * PCI devices, with the I/O APIC in its scope (source ID F0:1F.0) */
+    uint8_t d[48 + 24] = {0};
+    d[36] = 47;                          /* host address width - 1 */
+    d[37] = 1;                           /* INTR_REMAP (x2APIC opt-out clear) */
+    uint8_t drhd[24] = {0, 0, 24, 0, 1}; /* type 0, length 24, INCLUDE_PCI_ALL */
+    uint64_t base = DMAR_BASE;
+    memcpy(drhd + 8, &base, 8);
+    uint8_t scope[8] = {3, 8, 0, 0, (uint8_t)pc->ioapic.id, 0xF0, 0x1F, 0}; /* I/O APIC */
+    memcpy(drhd + 16, scope, 8);
+    memcpy(d + 48, drhd, 24);
+    acpi_header(d, "DMAR", sizeof d);
+    poke(pc, dmar, d, sizeof d);
+    poke8(pc, dmar + 9, checksum(pc, dmar, (int)sizeof d));
+
+    uint8_t r[44] = {0};
+    acpi_header(r, "RSDT", 44);
     memcpy(r + 36, &madt, 4);
-    poke(pc, rsdt, r, 40);
-    poke8(pc, rsdt + 9, checksum(pc, rsdt, 40));
+    memcpy(r + 40, &dmar, 4);
+    poke(pc, rsdt, r, 44);
+    poke8(pc, rsdt + 9, checksum(pc, rsdt, 44));
 
     uint8_t p[20] = {'R', 'S', 'D', ' ', 'P', 'T', 'R', ' '};
     memcpy(p + 9, "X86SIM", 6);

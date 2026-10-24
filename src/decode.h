@@ -40,6 +40,7 @@
     X(ENDBR64, "endbr64") X(ENDBR32, "endbr32") X(RDSSP, "rdssp") X(INCSSP, "incssp") X(RSTORSSP, "rstorssp") \
     X(SAVEPREVSSP, "saveprevssp") X(SETSSBSY, "setssbsy") X(CLRSSBSY, "clrssbsy") X(WRSS, "wrss") X(WRUSS, "wruss") \
     X(ADCX, "adcx") X(ADOX, "adox") \
+    X(XBEGIN, "xbegin") X(XABORT, "xabort") \
     X(GRP7R, "(grp7)") X(SGDT, "sgdt") X(SIDT, "sidt") X(LGDT, "lgdt") X(LIDT, "lidt") \
     X(SMSW, "smsw") X(LMSW, "lmsw") X(INVLPG, "invlpg") \
     X(PREFETCH, "prefetch") X(FXSAVE, "fxsave") X(FXRSTOR, "fxrstor") X(LDMXCSR, "ldmxcsr") X(STMXCSR, "stmxcsr") \

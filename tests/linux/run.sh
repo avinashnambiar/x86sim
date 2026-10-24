@@ -3,6 +3,7 @@
 # tests/linux/cache) with a tiny initramfs whose /init echoes a typed line
 # and reboots. Passes when the line comes back and the guest resets cleanly:
 # on one CPU, on two CPUs, and on two and eight CPUs with the MESI cache hierarchy.
+# Every boot must switch to x2APIC mode through VT-d interrupt remapping.
 cd "$(dirname "$0")/../.."
 CACHE=tests/linux/cache
 OUT=tests/out
@@ -25,7 +26,8 @@ boot() {
     rc=$?
     secs=$(( $(date +%s) - start ))
     if [ $rc -eq 0 ] && grep -q "you typed: hello" $OUT/$name.got && grep -q "reboot: Restarting system" $OUT/$name.got &&
-       { [ -z "$want" ] || grep -q "$want" $OUT/$name.got; } && ! grep -q "unchecked MSR" $OUT/$name.got; then
+       { [ -z "$want" ] || grep -q "$want" $OUT/$name.got; } && ! grep -q "unchecked MSR" $OUT/$name.got &&
+       grep -q "Enabled IRQ remapping in x2apic mode" $OUT/$name.got; then
         printf '  %-20s \033[32mPASS\033[0m (%ss)\n' $name $secs
     else
         printf '  %-20s \033[31mFAIL\033[0m (exit %d)\n' $name $rc

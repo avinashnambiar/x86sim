@@ -60,7 +60,9 @@ void machine_init(Machine *m) {
 static void free_program_state(Machine *m) {
     if (m->pc) pc_destroy(m->pc);
     m->pc = NULL;
+    tx_free(&m->cpu);
     for (int i = 1; i < MAX_CPUS; i++) {
+        if (m->cpus[i]) tx_free(m->cpus[i]);
         free(m->cpus[i]);
         m->cpus[i] = NULL;
     }

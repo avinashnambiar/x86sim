@@ -68,7 +68,7 @@ int pc_idle(Machine *m) {
     int wakeable = 0;
     for (int i = 0; i < m->ncpu; i++) {
         CPU *c = m->cpus[i];
-        if (!c->wait_sipi && ((c->rflags & FL_IF) || c->nmi_pending)) wakeable = 1;
+        if (!c->wait_sipi && ((c->rflags & FL_IF) || c->nmi_pending || c->smi_pending)) wakeable = 1;
     }
     if (!wakeable) return 0;
     uint64_t now = pc_now(pc), target = pc->next_event;
@@ -1258,6 +1258,8 @@ static uint8_t port_read8(PC *pc, uint16_t port) {
     case 0x71: return cmos_read(pc);
     case 0x70: return pc->cmos.index;
     case 0x92: return pc->port92 | (((pc_cpu(pc)->a20_mask >> 20) & 1) << 1);
+    case 0xB2: return pc->apm_cnt;
+    case 0xB3: return pc->apm_sts;
     case 0x4D0: return pc->pic[0].elcr;
     case 0x4D1: return pc->pic[1].elcr;
     case 0x3F6: return pc->hda.present ? (ide_present(pc) ? pc->ide.status : 0) : 0xFF;
@@ -1290,6 +1292,11 @@ static void port_write8(PC *pc, uint16_t port, uint8_t v) {
         pc->port92 = v & ~3;
         if (v & 1) pc_system_reset(pc);
         return;
+    case 0xB2: /* APM control: an SMI to the CPU that wrote it */
+        pc->apm_cnt = v;
+        pc_cpu(pc)->smi_pending = 1;
+        return;
+    case 0xB3: pc->apm_sts = v; return; /* APM status: scratch for the SMI handler */
     case 0x4D0: pc->pic[0].elcr = v & 0xF8; return;
     case 0x4D1: pc->pic[1].elcr = v & 0xDE; return;
     case 0x3F6: ide_control(pc, v); return;
@@ -1563,24 +1570,30 @@ static void setup_cpu(Machine *m, CPU *c, int i) {
     c->get_interrupt = get_interrupt;
     c->msr_hook = apic_msr;
     c->pmi_hook = pmi;
+    c->tx_live = &m->tx_live;
+    c->peers = m->cpus;
     c->tpr_hook = apic_tpr;
     c->on_mmio = apic_mmio;
     c->mmio_lo = IOAPIC_BASE;
     c->mmio_hi = LAPIC_BASE + 0x1000;
     c->cpuid_1d |= 1u << 9;  /* APIC */
     c->cpuid_1c |= 1u << 24; /* TSC deadline timer */
+    c->cpuid_1c |= 1u << 21; /* x2APIC */
 }
 
 /* INIT: an application processor resets and waits for a STARTUP IPI.
- * The APIC base MSR, the local APIC ID and the A20 state survive. */
+ * The APIC base MSR, the local APIC ID, the A20 state, SMBASE and the
+ * SMRRs survive. */
 void pc_cpu_init(PC *pc, int i) {
     Machine *m = pc->m;
     CPU *c = m->cpus[i];
     uint64_t apic_base = c->msr.apic_base ? c->msr.apic_base : LAPIC_BASE | 0x800;
     uint64_t a20 = m->cpu.a20_mask ? m->cpu.a20_mask : ~0ULL;
+    uint64_t smbase = c->smbase, smrr_base = c->smrr_base, smrr_mask = c->smrr_mask;
     c->icache = m->cpu.icache; /* the decoded-instruction cache is shared (keyed by physical address) */
     cpu_reset_system(c);
     setup_cpu(m, c, i);
+    if (smbase) c->smbase = smbase, c->smrr_base = smrr_base, c->smrr_mask = smrr_mask;
     c->msr.apic_base = apic_base;
     c->a20_mask = a20;
     c->wait_sipi = 1;

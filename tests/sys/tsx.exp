@@ -1,0 +1,11 @@
+rtm cpuid, xtest outside 00000001 00000001 
+commit: xtest inside, read inside, after 00000001 00000005 00000005 
+xabort: status, memory, ebx 42000001 00000001 00000007 
+cpuid aborts: status, memory 00000000 00000001 
+#de aborts, not delivered: status 00000000 
+nested: xtest after inner xend, abort status 00000001 01000021 
+capacity: status, memory 00000008 00000000 
+conflict from the other cpu: status 00000006 
+isolation: status, max value the other cpu saw 00000006 00000000 
+lock elision: counter, some commits 00000fa0 00000001 
+bye

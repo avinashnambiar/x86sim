@@ -554,7 +554,8 @@ static void cpuid(CPU *c) {
               | (1u << 18)         /* RDSEED */
               | (1u << 19)         /* ADX */
               | (1u << 20)         /* SMAP */
-              | (1u << 29);        /* SHA */
+              | (1u << 29)         /* SHA */
+              | (c->tx_live ? 1u << 11 : 0); /* RTM (system mode) */
             cc = (1u << 2)         /* UMIP */
                | (1u << 3)         /* PKU */
                | (1u << 7)         /* CET shadow stacks */
@@ -1337,8 +1338,15 @@ static void execute(CPU *c, const Insn *in) {
             setreg(c, RCX, 4, 1, 0);
             break;
         }
+        if (in->modrm == 0xD5 || in->modrm == 0xD6) raise_exc(c, EXC_UD, 0, "#UD no RTM in user-mode emulation");
         if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP privileged instruction");
         unimplemented(c, in);
+    case I_XBEGIN:
+        tx_begin(c, in);
+        break;
+    case I_XABORT:
+        tx_xabort(c, (uint8_t)in->imm);
+        break;
     case I_SGDT: case I_SIDT: case I_LGDT: case I_LIDT: case I_SMSW: case I_LMSW: case I_INVLPG:
     case I_SLDT: case I_STR: case I_LLDT: case I_LTR: case I_VERR: case I_VERW: case I_LAR: case I_LSL:
     case I_CLTS: case I_SYSRET: case I_SYSEXIT: case I_INVD: case I_WBINVD: case I_MOVCR: case I_MOVDR:

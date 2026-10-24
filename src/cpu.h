@@ -214,8 +214,14 @@ struct CPU {
     Snapshot snap;
     struct ICache *icache; /* decoded instructions by physical address (sys mode) */
     int snap_valid;
-    int (*msr_hook)(CPU *c, uint32_t msr, uint64_t *val, int write); /* 1 = handled */
+    int (*msr_hook)(CPU *c, uint32_t msr, uint64_t *val, int write); /* 1 handled, -1 #GP */
     Pmu pmu;
+    struct Tx *tx;         /* RTM transaction state (tsx.c), allocated by the first XBEGIN */
+    int *tx_live;          /* transactions active in the machine; NULL = no RTM (user mode) */
+    CPU **peers;           /* every CPU in the machine, for transaction conflicts */
+    int tx_jump;           /* the longjmp out of this instruction is a transaction abort */
+    int smm, smi_pending;  /* in system management mode; an SMI is waiting (smm.c) */
+    uint64_t smbase, smrr_base, smrr_mask, smi_count;
     void (*pmi_hook)(CPU *c); /* a counter with its interrupt enabled overflowed */
     void (*tpr_hook)(CPU *c, int tpr);
     uint32_t cpuid_1c, cpuid_1d; /* extra CPUID.1 feature bits from the machine (APIC etc.) */

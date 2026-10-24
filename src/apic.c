@@ -18,6 +18,9 @@ static int ncpu(PC *pc) { return pc->m->ncpu; }
 static CPU *cpu_at(PC *pc, int i) { return pc->m->cpus[i]; }
 
 int lapic_enabled(PC *pc, int i) { return (cpu_at(pc, i)->msr.apic_base & 0x800) != 0; }
+static int x2apic(PC *pc, int i) { return (cpu_at(pc, i)->msr.apic_base & 0x400) != 0; }
+/* x2APIC logical ID: cluster (ID / 16) in bits 31:16, one bit for ID % 16 */
+static uint32_t x2_ldr(uint32_t id) { return (id >> 4) << 16 | 1u << (id & 15); }
 static int sw_enabled(Lapic *a) { return (a->svr & 0x100) != 0; }
 static int lapic_on(PC *pc, int i) { return lapic_enabled(pc, i) && sw_enabled(&pc->lapic[i]); }
 
@@ -82,19 +85,28 @@ static void lapic_eoi(PC *pc, int i) {
 
 /* ---- message delivery (IPIs and I/O APIC interrupts) ---- */
 
-/* Does CPU i match an APIC destination? Logical mode uses the flat model
- * (DFR 0xF: LDR bit mask) or the cluster model (DFR 0x0). */
-static int dest_match(PC *pc, int i, uint32_t dest, int logical) {
+/* Does CPU i match an APIC destination? x2 means a 32-bit x2APIC
+ * destination (x2APIC ICR, remapped interrupts in extended mode), else an
+ * 8-bit xAPIC one. Logical mode is the x2APIC cluster model for an x2APIC
+ * target, else the flat model (DFR 0xF: LDR bit mask) or the cluster model
+ * (DFR 0x0). */
+static int dest_match(PC *pc, int i, uint32_t dest, int logical, int x2) {
     Lapic *a = &pc->lapic[i];
-    if (!logical) return dest == 0xFF || dest == a->id;
+    uint32_t all = x2 ? 0xFFFFFFFF : 0xFF;
+    if (dest == all) return 1;
+    if (!logical) return dest == a->id;
+    if (x2apic(pc, i)) {
+        uint32_t ldr = x2_ldr(a->id);
+        return x2 && (dest >> 16) == (ldr >> 16) && (dest & ldr & 0xFFFF) != 0;
+    }
+    dest &= 0xFF;
     uint32_t ldr = a->ldr >> 24;
-    if (dest == 0xFF) return 1;
     if ((a->dfr >> 28) == 0xF) return (ldr & dest) != 0;
     return (ldr >> 4) == (dest >> 4) && (ldr & dest & 0xF) != 0;
 }
 
 /* Deliver to the CPUs with tgt[i] set. mode: 0 fixed, 1 lowest priority,
- * 4 NMI, 5 INIT, 6 STARTUP. */
+ * 2 SMI, 4 NMI, 5 INIT, 6 STARTUP. */
 static void deliver(PC *pc, const uint8_t *tgt, int mode, int vector, int level) {
     int best = -1;
     if (mode == 1) { /* lowest priority: the enabled target with the lowest TPR */
@@ -107,6 +119,7 @@ static void deliver(PC *pc, const uint8_t *tgt, int mode, int vector, int level)
         if (best >= 0 ? i != best : !tgt[i]) continue;
         switch (mode) {
         case 0: lapic_accept(pc, i, vector, level); break;
+        case 2: cpu_at(pc, i)->smi_pending = 1; break;
         case 4: cpu_at(pc, i)->nmi_pending = 1; break;
         case 5: pc_cpu_init(pc, i); break;
         case 6: pc_cpu_sipi(pc, i, vector); break;
@@ -204,11 +217,11 @@ static uint32_t lapic_read(PC *pc, int i, uint32_t off) {
     if (off >= 0x180 && off < 0x200) return a->tmr[(off - 0x180) >> 4];
     if (off >= 0x200 && off < 0x280) return a->irr[(off - 0x200) >> 4];
     switch (off) {
-    case 0x20: return a->id << 24;
+    case 0x20: return x2apic(pc, i) ? a->id : a->id << 24;
     case 0x30: return 0x00060014; /* version 0x14, 7 LVT entries */
     case 0x80: return a->tpr;
     case 0xA0: return ppr(a);
-    case 0xD0: return a->ldr;
+    case 0xD0: return x2apic(pc, i) ? x2_ldr(a->id) : a->ldr;
     case 0xE0: return a->dfr;
     case 0xF0: return a->svr;
     case 0x280: return a->esr;
@@ -221,7 +234,8 @@ static uint32_t lapic_read(PC *pc, int i, uint32_t off) {
     return 0;
 }
 
-static void send_ipi(PC *pc, int src) {
+/* Send the IPI in the ICR; x2: the x2APIC ICR (32-bit destination in icr_hi). */
+static void send_ipi(PC *pc, int src, int x2) {
     Lapic *a = &pc->lapic[src];
     uint32_t lo = a->icr_lo;
     int shorthand = (lo >> 18) & 3, mode = (lo >> 8) & 7;
@@ -229,7 +243,7 @@ static void send_ipi(PC *pc, int src) {
     if (mode == 5 && !(lo & (1u << 14)) && (lo & (1u << 15))) return; /* INIT level de-assert */
     for (int i = 0; i < ncpu(pc); i++) {
         switch (shorthand) {
-        case 0: tgt[i] = (uint8_t)dest_match(pc, i, a->icr_hi >> 24, (lo & 0x800) != 0); break;
+        case 0: tgt[i] = (uint8_t)dest_match(pc, i, x2 ? a->icr_hi : a->icr_hi >> 24, (lo & 0x800) != 0, x2); break;
         case 1: tgt[i] = i == src; break;
         case 2: tgt[i] = 1; break;
         default: tgt[i] = i != src; break;
@@ -271,7 +285,7 @@ static void lapic_write(PC *pc, int i, uint32_t off, uint32_t v) {
     case 0x280: a->esr = 0; break;
     case 0x300:
         a->icr_lo = v;
-        send_ipi(pc, i);
+        send_ipi(pc, i, 0);
         break;
     case 0x310: a->icr_hi = v; break;
     case 0x380:
@@ -289,18 +303,78 @@ void apic_tpr(CPU *c, int tpr) {
     pc_update_irq(pc);
 }
 
+/* x2APIC registers as MSRs 0x800 + offset / 16; -1 = #GP. */
+static int x2apic_reg(uint32_t off) {
+    if (off >= 0x100 && off < 0x280) return 1; /* ISR, TMR, IRR */
+    switch (off) {
+    case 0x20: case 0x30: case 0x80: case 0xA0: case 0xB0: case 0xD0: case 0xF0: case 0x280: case 0x2F0:
+    case 0x300: case 0x320: case 0x330: case 0x340: case 0x350: case 0x360: case 0x370: case 0x380: case 0x390:
+    case 0x3E0: case 0x3F0:
+        return 1;
+    }
+    return 0;
+}
+
+static int x2apic_msr(PC *pc, int i, uint32_t msr, uint64_t *val, int write) {
+    Lapic *a = &pc->lapic[i];
+    uint32_t off = (msr - 0x800) << 4;
+    if (!x2apic(pc, i) || !x2apic_reg(off)) return -1;
+    if (!write) {
+        if (off == 0xB0 || off == 0x3F0) return -1; /* EOI, self IPI: write-only */
+        *val = off == 0x300 ? (uint64_t)a->icr_hi << 32 | (a->icr_lo & ~(1u << 12)) : lapic_read(pc, i, off);
+        return 1;
+    }
+    uint64_t v = *val;
+    if (off == 0x300) { /* ICR: one 64-bit write, destination in the high half */
+        if (v & 0xFFF32000ULL) return -1;
+        a->icr_hi = (uint32_t)(v >> 32);
+        a->icr_lo = (uint32_t)v;
+        send_ipi(pc, i, 1);
+        return 1;
+    }
+    if (v >> 32) return -1;
+    switch (off) {
+    case 0x20: case 0x30: case 0xA0: case 0xD0: case 0x390: /* read-only */
+        return -1;
+    case 0xB0:
+        if (v) return -1;
+        lapic_eoi(pc, i);
+        return 1;
+    case 0x280:
+        if (v) return -1;
+        break;
+    case 0x3F0: /* SELF IPI */
+        if (v & ~0xFFULL) return -1;
+        lapic_accept(pc, i, (int)v, 0);
+        return 1;
+    }
+    if (off >= 0x100 && off < 0x280) return -1;
+    lapic_write(pc, i, off, (uint32_t)v);
+    return 1;
+}
+
 int apic_msr(CPU *c, uint32_t msr, uint64_t *val, int write) {
     PC *pc = ((Machine *)c->user)->pc;
     Lapic *a = &pc->lapic[c->index];
     switch (msr) {
-    case 0x1B:
+    case 0x1B: {
         if (!write) {
             *val = c->msr.apic_base;
             return 1;
         }
-        c->msr.apic_base = (*val & 0xFFFFFF000ULL) | (*val & 0x800) | (c->msr.apic_base & 0x100);
+        /* enable (bit 11) and x2APIC (bit 10): disabled -> xAPIC -> x2APIC,
+         * and back only through disabled */
+        uint64_t v = *val, old = c->msr.apic_base & 0xC00, new = v & 0xC00;
+        if ((v & ~0xFFFFFFD00ULL) || new == 0x400 || (old == 0xC00 && new == 0x800) || (old == 0 && new == 0xC00))
+            return -1;
+        c->msr.apic_base = (v & 0xFFFFFF000ULL) | new | (c->msr.apic_base & 0x100);
+        if (!new && old) { /* disabling resets the local APIC */
+            lapic_reset(pc, c->index);
+            c->msr.apic_base = (v & 0xFFFFFF000ULL) | (c->msr.apic_base & 0x100);
+        }
         pc_update_irq(pc);
         return 1;
+    }
     case 0x6E0: /* IA32_TSC_DEADLINE */
         if (!write) {
             *val = a->deadline ? a->deadline + c->tsc_offset : 0;
@@ -313,6 +387,7 @@ int apic_msr(CPU *c, uint32_t msr, uint64_t *val, int write) {
         }
         return 1;
     }
+    if (msr >= 0x800 && msr < 0x900) return x2apic_msr(pc, c->index, msr, val, write);
     return 0;
 }
 
@@ -323,13 +398,22 @@ int apic_msr(CPU *c, uint32_t msr, uint64_t *val, int write) {
 #define RE_MASKED (1ULL << 16)
 #define RE_LOGICAL (1ULL << 11)
 
+/* An interrupt message: to the CPUs matching dest. */
+void apic_message(PC *pc, uint32_t dest, int logical, int x2, int mode, int vector, int level) {
+    uint8_t tgt[MAX_CPUS];
+    for (int i = 0; i < ncpu(pc); i++) tgt[i] = (uint8_t)dest_match(pc, i, dest, logical, x2);
+    if (mode == 0 || mode == 1 || mode == 2 || mode == 4) deliver(pc, tgt, mode, vector, level);
+}
+
 static void ioapic_deliver(PC *pc, int pin) {
     uint64_t e = pc->ioapic.redir[pin];
     int mode = (int)(e >> 8) & 7;
     if (mode == 7) return; /* ExtINT: the 8259 path already carries it */
-    uint8_t tgt[MAX_CPUS];
-    for (int i = 0; i < ncpu(pc); i++) tgt[i] = (uint8_t)dest_match(pc, i, (uint32_t)(e >> 56), (e & RE_LOGICAL) != 0);
-    if (mode == 0 || mode == 1 || mode == 4) deliver(pc, tgt, mode, (int)(e & 0xFF), (e & RE_LEVEL) != 0);
+    if (iommu_ir_enabled(pc)) { /* through the interrupt-remapping table */
+        iommu_ioapic(pc, e, (e & RE_LEVEL) != 0);
+        return;
+    }
+    apic_message(pc, (uint32_t)(e >> 56), (e & RE_LOGICAL) != 0, 0, mode, (int)(e & 0xFF), (e & RE_LEVEL) != 0);
 }
 
 static void ioapic_service(PC *pc, int pin) {
@@ -394,6 +478,11 @@ static void ioapic_write(PC *pc, uint32_t v) {
 int apic_mmio(CPU *c, uint64_t pa, void *buf, int n, int write) {
     PC *pc = ((Machine *)c->user)->pc;
     uint32_t v = 0;
+    if (pa >= LAPIC_BASE && pa < LAPIC_BASE + 0x1000 && x2apic(pc, c->index)) { /* no MMIO in x2APIC mode */
+        if (!write) memset(buf, 0, (size_t)n);
+        return 1;
+    }
+    if (pa >= DMAR_BASE && pa < DMAR_BASE + 0x1000) return iommu_mmio(pc, (uint32_t)(pa - DMAR_BASE), buf, n, write);
     if (pa >= LAPIC_BASE && pa < LAPIC_BASE + 0x1000 && lapic_enabled(pc, c->index)) {
         uint32_t off = (uint32_t)(pa & 0xFF0), sh = (uint32_t)(pa & 3) * 8;
         if (write) {
@@ -438,6 +527,7 @@ void apic_reset(PC *pc) {
         cpu_at(pc, i)->msr.apic_base = LAPIC_BASE | 0x800 | (i == 0 ? 0x100 : 0); /* enabled; BSP flag */
     }
     memset(&pc->ioapic, 0, sizeof pc->ioapic);
+    iommu_reset(pc);
     pc->ioapic.id = (uint32_t)(ncpu(pc) < 15 ? ncpu(pc) : 15); /* after the local APIC IDs (4-bit register) */
     for (int i = 0; i < 24; i++) pc->ioapic.redir[i] = RE_MASKED;
 }

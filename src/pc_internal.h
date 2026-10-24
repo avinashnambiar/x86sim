@@ -12,6 +12,7 @@
 #define NS_NEVER UINT64_MAX
 #define LAPIC_BASE 0xFEE00000ULL
 #define IOAPIC_BASE 0xFEC00000ULL
+#define DMAR_BASE 0xFED90000ULL /* the VT-d remapping unit's registers */
 #define BIOS_STUBS 0xF0000u /* one 16-byte HLE stub per interrupt vector */
 #define BIOS_PORT 0xEF      /* the stubs trap into C with OUT to this port */
 #define CACHE_PORT 0xEC     /* debug: OUT dword = physical address, IN dword = its line states */
@@ -105,6 +106,11 @@ typedef struct {
     uint32_t lines;
 } Ioapic;
 
+typedef struct {                     /* VT-d remapping unit (iommu.c) */
+    uint32_t gsts, fectl, fedata, feaddr, feuaddr, iectl, iedata, ieaddr, ieuaddr, ics, pmen;
+    uint64_t rtaddr, irta, irt, iqa, iqh, iqt; /* irt: the table latched by SIRTP */
+} Iommu;
+
 typedef struct {
     uint8_t crtc_index, crtc[32];
     uint8_t seq_index, seq[8], gc_index, gc[16], attr_index, attr[32], attr_flip;
@@ -141,8 +147,10 @@ struct PC {
     Disk hda, fda;
     Lapic lapic[MAX_CPUS]; /* one per CPU, APIC ID = CPU index */
     Ioapic ioapic;
+    Iommu iommu;
     Vga vga;
     uint8_t port92;
+    uint8_t apm_cnt, apm_sts; /* ports 0xB2/0xB3: writing 0xB2 raises an SMI */
     uint16_t isa_lines;  /* current ISA IRQ input levels */
     InQ in_uart, in_kbd;
     uint32_t cache_query;  /* address for CACHE_PORT */
@@ -191,6 +199,12 @@ void lapic_accept(PC *pc, int i, int vector, int level);
 uint64_t lapic_next_event(PC *pc);
 void lapic_tick(PC *pc, uint64_t now);
 void lapic_pmi(PC *pc, int i);
+void apic_message(PC *pc, uint32_t dest, int logical, int x2, int mode, int vector, int level);
+/* iommu.c: VT-d interrupt remapping */
+int iommu_mmio(PC *pc, uint32_t off, void *buf, int n, int write);
+int iommu_ir_enabled(PC *pc);
+void iommu_ioapic(PC *pc, uint64_t rte, int level);
+void iommu_reset(PC *pc);
 int apic_msr(CPU *c, uint32_t msr, uint64_t *val, int write);
 void apic_tpr(CPU *c, int tpr);
 void ioapic_set_irq(PC *pc, int pin, int level);

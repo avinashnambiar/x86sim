@@ -120,6 +120,8 @@ static const char *grp7r_name(uint8_t modrm) {
     case 0xCA: return "clac";
     case 0xCB: return "stac";
     case 0xD0: return "xgetbv";
+    case 0xD5: return "xend";
+    case 0xD6: return "xtest";
     case 0xD1: return "xsetbv";
     case 0xF8: return "swapgs";
     case 0xF9: return "rdtscp";
