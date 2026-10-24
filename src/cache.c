@@ -224,13 +224,22 @@ static int snoop(CacheSys *s, int unit, uint64_t line, int write, CohEvent *e) {
     return shared;
 }
 
+static void event(CacheSys *s, int unit, int ev) {
+    if (s->on_event) s->on_event(s->ev_ctx, unit >> 1, ev);
+}
+
 static CacheLine *l1_miss(CacheSys *s, int unit, uint64_t line, int write) {
     Cache *x = unit_cache(s, unit);
+    uint64_t c2c = s->bus.c2c, l2miss = s->l2.st.misses;
+    event(s, unit, (unit & 1) ? CE_L1I_MISS : CE_L1D_MISS);
+    event(s, unit, CE_L2_REF);
     CohEvent *e = log_event(s, write ? BUS_RDX : BUS_RD, unit, line, MESI_I);
     if (write) s->bus.bus_rdx++;
     else s->bus.bus_rd++;
     int shared = snoop(s, unit, line, write, e);
     CacheLine *l2 = l2_get(s, line);
+    if (s->bus.c2c != c2c) event(s, unit, CE_HITM);       /* another core had it modified */
+    if (s->l2.st.misses != l2miss) event(s, unit, CE_L2_MISS);
     CacheLine *v = victim(x, line);
     if (v->state != MESI_I) l1_evict(s, x, unit, v);
     memcpy(v->data, l2->data, CACHE_LINE);

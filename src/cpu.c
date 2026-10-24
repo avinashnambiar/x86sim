@@ -577,6 +577,13 @@ static void cpuid(CPU *c) {
         }
         break;
     }
+    case 0xA: /* architectural perfmon v4: 8 general counters, 3 fixed, 48 bits; no mispredict event */
+        if (c->sys) {
+            a = 4 | PMU_GP << 8 | 48 << 16 | 7 << 24;
+            b = 1u << 6;
+            d = PMU_FIXED | 48 << 5;
+        }
+        break;
     case 0xB: /* extended topology: one thread per core, ncpu cores */
         if (sub == 0) { a = 0; b = 1; cc = 1u << 8; }
         else if (sub == 1) { a = core_bits; b = ncpu; cc = 1 | 2u << 8; }

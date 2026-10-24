@@ -1,0 +1,7 @@
+smc patch executed code 00000001 00000002 
+smc patch next instruction 00000043 
+smc rep movsb over routine 00000003 
+smc loop rewrites itself 00000055 
+cmc bsp sees ap's patch 00000007 
+cmc ap runs old, then bsp's new code 00000011 00000099 
+bye

@@ -115,6 +115,12 @@ void sys_sysexit(CPU *c, int rexw);
 uint64_t sys_rdtsc(CPU *c);
 int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v);
 int sys_wrmsr(CPU *c, uint32_t idx, uint64_t v);
+/* pmu.c: performance-monitoring MSRs (returns 1 if idx is one: *err set on #GP),
+ * events, instruction retirement and RDPMC. */
+int pmu_msr(CPU *c, uint32_t idx, uint64_t *v, int write, int *err);
+void pmu_count(CPU *c, int ev, uint64_t n, int cpl);
+void pmu_retire(CPU *c, const Insn *in, int cpl);
+int pmu_rdpmc(CPU *c, uint32_t idx, uint64_t *v);
 void sys_write_cr(CPU *c, int n, uint64_t v);
 uint64_t sys_read_cr(CPU *c, int n);
 void sys_write_dr(CPU *c, int n, uint64_t v);

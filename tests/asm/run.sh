@@ -2,7 +2,8 @@
 # The web UI's assembly editor: starts x86sim -u with an empty PC, then
 # assembles, loads and runs every example in ui/asm/ through /api/asm and
 # checks the console output, the exception report, multi-CPU loads, reset
-# replay, assembler diagnostics and refused load addresses.
+# replay, assembler diagnostics and refused load addresses (including one
+# program landing on another's code or stack).
 cd "$(dirname "$0")/../.."
 PORT=${PORT:-8097}
 U=http://127.0.0.1:$PORT
@@ -50,5 +51,10 @@ check refuse-bios "$(load hello64.s 64 0 a0000 | field "d['diagnostics']")" "ove
 check refuse-tables "$(load hello64.s 64 0 100000 | field "d['diagnostics']")" "editor's GDT, IDTs and page tables"
 check refuse-align16 "$(load hello16.s 16 0 10008 | field "d['diagnostics']")" "16-byte aligned"
 check memory-only "$(load hello64.s 64 -1 2000000 | field "d['asm']['cpu']")" "-1"
+newpc 2 0; load hello64.s 64 0 200000 > /dev/null
+check refuse-overlap "$(load hello64.s 64 1 208000 | field "d['diagnostics']")" "overlaps CPU 0's program at 0x200000-0x210000"
+check refuse-overlap-data "$(load hello64.s 64 -1 20f000 | field "d['diagnostics']")" "overlaps CPU 0's program"
+check own-slot-ok "$(load hello64.s 64 1 $(slot 1) | field "d['asm']['cpu']")" "1"
+check reload-same-cpu "$(load hello64.s 64 0 200000 | field "d['asm']['cpu']")" "0"
 echo "asm editor tests passed: $pass  failed: $fail"
 [ $fail -eq 0 ]

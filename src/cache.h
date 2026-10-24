@@ -25,6 +25,7 @@ enum { MESI_I, MESI_S, MESI_E, MESI_M };
 enum { CA_READ, CA_WRITE, CA_FETCH };
 enum { CU_L1D, CU_L1I };                         /* L1 units of a core */
 enum { BUS_RD, BUS_RDX, BUS_UPGR, BUS_WB, BUS_BACKINV, BUS_FLUSH }; /* log operations */
+enum { CE_L1D_MISS, CE_L1I_MISS, CE_L2_REF, CE_L2_MISS, CE_HITM };   /* events for the PMU */
 
 typedef struct {
     uint64_t tag;        /* line address (physical address >> 6) */
@@ -74,6 +75,8 @@ typedef struct CacheSys {
     } bus;
     CohEvent log[CACHE_LOG_LEN];
     uint64_t nlog;
+    void (*on_event)(void *ctx, int core, int ev); /* CE_* for the requesting core */
+    void *ev_ctx;
 } CacheSys;
 
 CacheSys *cache_new(Mem *mem, int ncores);

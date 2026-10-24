@@ -143,6 +143,20 @@ typedef struct {
 
 typedef enum { STEP_OK, STEP_EXCEPTION, STEP_STOP, STEP_HALT, STEP_SHUTDOWN } StepResult;
 
+/* Performance monitoring unit (pmu.c). Counters 0-7 are general purpose,
+ * 8-10 the fixed counters (instructions, core cycles, reference cycles). */
+enum { PE_NONE, PE_INSN, PE_CYCLES, PE_REF, PE_BRANCH, PE_BRANCH_COND, PE_L1D_MISS, PE_L1I_MISS, PE_L2_REF, PE_L2_MISS, PE_HITM, PE_COUNT };
+#define PMU_GP 8
+#define PMU_FIXED 3
+typedef struct {
+    uint64_t ctr[PMU_GP + PMU_FIXED];  /* 48-bit counts */
+    uint64_t evtsel[PMU_GP], fixed_ctrl, global_ctrl, global_status;
+    uint8_t ev[PMU_GP + PMU_FIXED];    /* PE_* counted by each enabled counter, else PE_NONE */
+    uint8_t os[PMU_GP + PMU_FIXED], usr[PMU_GP + PMU_FIXED], pmi[PMU_GP + PMU_FIXED];
+    uint32_t watch;                    /* 1 << PE_* for every event some counter wants */
+    uint64_t lbr[3][32], lbr_tos, lbr_select; /* last-branch-record MSRs: storage only, nothing records */
+} Pmu;
+
 typedef struct CPU CPU;
 struct CPU {
     uint64_t r[16];
@@ -201,6 +215,8 @@ struct CPU {
     struct ICache *icache; /* decoded instructions by physical address (sys mode) */
     int snap_valid;
     int (*msr_hook)(CPU *c, uint32_t msr, uint64_t *val, int write); /* 1 = handled */
+    Pmu pmu;
+    void (*pmi_hook)(CPU *c); /* a counter with its interrupt enabled overflowed */
     void (*tpr_hook)(CPU *c, int tpr);
     uint32_t cpuid_1c, cpuid_1d; /* extra CPUID.1 feature bits from the machine (APIC etc.) */
     TlbEnt tlb[TLB_SIZE];

@@ -190,6 +190,7 @@ int lapic_accepts_pic(PC *pc, int i);
 void lapic_accept(PC *pc, int i, int vector, int level);
 uint64_t lapic_next_event(PC *pc);
 void lapic_tick(PC *pc, uint64_t now);
+void lapic_pmi(PC *pc, int i);
 int apic_msr(CPU *c, uint32_t msr, uint64_t *val, int write);
 void apic_tpr(CPU *c, int tpr);
 void ioapic_set_irq(PC *pc, int pin, int level);

@@ -114,6 +114,18 @@ static void deliver(PC *pc, const uint8_t *tgt, int mode, int vector, int level)
     }
 }
 
+/* A performance counter overflowed with its interrupt enabled: deliver the
+ * LVT performance entry (fixed or NMI) and mask it, as the hardware does. */
+void lapic_pmi(PC *pc, int i) {
+    Lapic *a = &pc->lapic[i];
+    uint32_t l = a->lvt[LVT_PERF];
+    if (!lapic_on(pc, i) || (l & LVT_MASKED)) return;
+    if (((l >> 8) & 7) == 4) cpu_at(pc, i)->nmi_pending = 1;
+    else lapic_accept(pc, i, l & 0xFF, 0);
+    a->lvt[LVT_PERF] = l | LVT_MASKED;
+    pc_update_irq(pc);
+}
+
 /* ---- timer ---- */
 
 static uint64_t timer_div(Lapic *a) {

@@ -105,6 +105,10 @@ size.
   Entry is `_start`, or the first instruction.
 - Every CPU has a default slot, with code at the bottom and the stack at the
   top: 32/64-bit at 0x200000 + cpu × 64 KiB, 16-bit at 0x10000 + cpu × 4 KiB.
+  A load is refused if its code and stack would overlap another loaded
+  program (reloading the same CPU replaces its old program). Nothing stops a
+  running program from writing elsewhere in memory: like real bare metal,
+  every CPU sees all of physical memory.
   The CPU starts directly in the chosen mode, with interrupts off:
   - 16-bit real mode: CS = DS = ES = SS = address / 16, BIOS services available.
   - 32-bit protected mode: flat segments (code 0x08, data 0x10).
@@ -198,6 +202,7 @@ src/mmu.c         paging (32-bit, PAE, 4/5-level), PCID TLB, SMEP/SMAP/PKU,
                   CET shadow-stack pages
 src/cet.c         CET shadow stacks and indirect branch tracking
 src/cache.[ch]    L1/L2 cache hierarchy with MESI coherence
+src/pmu.c         performance counters (architectural perfmon v4), RDPMC, PMIs
 src/pc.c          PC machine: clock, 8259 PIC, 8254 PIT, CMOS/RTC, 8042, 16550,
                   VGA, PCI, IDE; SMP bring-up
 src/apic.c        local APICs (timer, IPIs) and the I/O APIC
@@ -230,10 +235,13 @@ edge-case values and compares every architecturally defined flag.
 - `tests/sys/run.sh` — bare-metal programs booted in PC mode: protected and
   long mode, paging, task switches, VM86, BIOS services and devices, disk and
   floppy boot, CET, SMP bring-up with IPIs and shared counters, the MESI
-  transitions of one line (`smpcache`), and 32 CPUs started at once
-  (`smpmany`).
+  transitions of one line (`smpcache`), 32 CPUs started at once
+  (`smpmany`), the performance counters with an overflow interrupt
+  (`pmu`), and self- and cross-modifying code with and without the caches
+  (`smc`, `smcnocache`).
 - `tests/asm/run.sh` — the assembly editor's API: every example in each
-  mode, multi-CPU loads, reset replay, diagnostics and refused addresses.
+  mode, multi-CPU loads, reset replay, diagnostics and refused addresses
+  (including overlapping programs).
 - `tests/softfloat/run.sh` — x87 arithmetic and transcendentals against
   reference results.
 - `tests/linux/run.sh` — boots Alpine's Linux 6.6 kernel (downloaded once) on
@@ -250,6 +258,12 @@ Implemented:
 - System architecture: real/protected/long/VM86 modes, paging with PCID,
   SMEP/SMAP, protection keys, hardware task switching, SYSCALL/SYSENTER,
   XSAVE, FSGSBASE, UMIP, LA57, CET (shadow stacks, IBT)
+- Performance counters: architectural perfmon v4 (3 fixed + 8 general 48-bit
+  counters, global control/status, RDPMC, overflow interrupts as a vector or
+  NMI). Events: instructions, cycles (one per instruction), branches, and
+  with `--cache` L1D/L1I/L2 misses and cross-core modified-line transfers.
+  The simulator models behavior, not microarchitecture: there is no branch
+  predictor or pipeline timing, and the LBR MSRs hold values but record nothing
 - A PC that boots disks, floppies and Linux, with SMP (up to 255 CPUs) and a
   MESI cache hierarchy
 - Linux user mode (≈45 syscalls), DOS int 21h and BIOS services

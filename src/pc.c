@@ -1540,6 +1540,16 @@ int pc_load_image(Machine *m, char *err, size_t errn); /* loader.c */
 
 void pc_rebind(Machine *m) { m->pc->m = m; }
 
+static void pmi(CPU *c) { lapic_pmi(((Machine *)c->user)->pc, c->index); }
+
+/* Cache events count on the requesting core's performance counters. */
+static void cache_event(void *ctx, int core, int ev) {
+    static const uint8_t map[] = {[CE_L1D_MISS] = PE_L1D_MISS, [CE_L1I_MISS] = PE_L1I_MISS,
+                                  [CE_L2_REF] = PE_L2_REF, [CE_L2_MISS] = PE_L2_MISS, [CE_HITM] = PE_HITM};
+    Machine *m = ctx;
+    if (core < m->ncpu && m->cpus[core]) pmu_count(m->cpus[core], map[ev], 1, m->cpus[core]->cpl);
+}
+
 /* Wire CPU i to the machine (after a reset cleared it). */
 static void setup_cpu(Machine *m, CPU *c, int i) {
     c->mem = m->mem;
@@ -1552,6 +1562,7 @@ static void setup_cpu(Machine *m, CPU *c, int i) {
     c->read_tsc = tsc_read;
     c->get_interrupt = get_interrupt;
     c->msr_hook = apic_msr;
+    c->pmi_hook = pmi;
     c->tpr_hook = apic_tpr;
     c->on_mmio = apic_mmio;
     c->mmio_lo = IOAPIC_BASE;
@@ -1729,6 +1740,8 @@ int pc_load(Machine *m, char *err, size_t errn) {
     m->ncpu = m->pc_smp < 1 ? 1 : m->pc_smp > MAX_CPUS ? MAX_CPUS : m->pc_smp;
     if (m->pc_cache) { /* write-back RAM; the legacy video/ROM hole and MMIO are uncached */
         m->cache = cache_new(m->mem, m->ncpu);
+        m->cache->on_event = cache_event;
+        m->cache->ev_ctx = m;
         cache_add_range(m->cache, 0, 0xA0000);
         cache_add_range(m->cache, 0x100000, pc->lowmem);
         if (pc->highmem) cache_add_range(m->cache, 0x100000000ULL, 0x100000000ULL + pc->highmem);

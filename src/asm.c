@@ -136,21 +136,37 @@ int asm_load(Machine *m, const char *src, size_t n, int bits, int intel, int cpu
     uint64_t slot = bits == 16 ? PC_SLOT16 : PC_SLOT, need = pc_object_size(l.obj, l.objn);
     l.stack = addr + (need + 256 > slot ? (need + 256 + 0xFFF) & ~0xFFFULL : slot);
     char err[256];
-    if (pc_check_load(m, bits, addr, (cpu >= 0 ? l.stack : addr + need) - addr, err, sizeof err) ||
-        place(m, &l, err, sizeof err)) {
-        snprintf(diag, diagn, "%s", err);
-        free(l.obj);
-        return -1;
-    }
-    /* remember it, replacing an earlier load for the same CPU (or address) */
+    uint64_t top = cpu >= 0 ? l.stack : addr + need;
+    /* the load it replaces: the same CPU's (or, for data, the same address) */
     int i;
     for (i = 0; i < m->nasm_loads; i++)
         if (cpu >= 0 ? m->asm_loads[i].cpu == cpu : (m->asm_loads[i].cpu < 0 && m->asm_loads[i].addr == addr)) break;
+    if (pc_check_load(m, bits, addr, top - addr, err, sizeof err)) goto fail;
+    for (int k = 0; k < m->nasm_loads; k++) { /* code and stack must not land on another program's */
+        AsmLoad *o = &m->asm_loads[k];
+        uint64_t otop = o->cpu >= 0 ? o->stack : o->addr + o->size;
+        if (k == i || addr >= otop || top <= o->addr) continue;
+        if (o->cpu >= 0)
+            snprintf(err, sizeof err,
+                     "0x%llx-0x%llx (code and stack) overlaps CPU %d's program at 0x%llx-0x%llx: pick another address",
+                     (unsigned long long)addr, (unsigned long long)top, o->cpu, (unsigned long long)o->addr,
+                     (unsigned long long)otop);
+        else
+            snprintf(err, sizeof err, "0x%llx-0x%llx overlaps the data loaded at 0x%llx-0x%llx: pick another address",
+                     (unsigned long long)addr, (unsigned long long)top, (unsigned long long)o->addr,
+                     (unsigned long long)otop);
+        goto fail;
+    }
+    if (place(m, &l, err, sizeof err)) goto fail;
     if (i == m->nasm_loads) m->asm_loads = realloc(m->asm_loads, (size_t)++m->nasm_loads * sizeof *m->asm_loads);
     else free(m->asm_loads[i].obj);
     m->asm_loads[i] = l;
     *info = l;
     return 0;
+fail:
+    snprintf(diag, diagn, "%s", err);
+    free(l.obj);
+    return -1;
 }
 
 int asm_check(const char *src, size_t n, int bits, int intel, char *diag, size_t diagn) {

@@ -918,7 +918,9 @@ static int uncore_msr(uint32_t idx) {
 }
 
 int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v) {
+    int err;
     if (c->msr_hook && c->msr_hook(c, idx, v, 0)) return 0;
+    if (pmu_msr(c, idx, v, 0, &err)) return err ? -1 : 0;
     switch (idx) {
     case 0x10: *v = read_tsc(c); return 0;
     case 0x1B: *v = c->msr.apic_base; return 0;
@@ -964,7 +966,9 @@ int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v) {
 }
 
 int sys_wrmsr(CPU *c, uint32_t idx, uint64_t v) {
+    int err;
     if (c->msr_hook && c->msr_hook(c, idx, &v, 1)) return 0;
+    if (pmu_msr(c, idx, &v, 1, &err)) return err ? -1 : 0;
     switch (idx) {
     case 0x10: c->tsc_offset = v - (c->read_tsc ? c->read_tsc(c) : c->icount); return 0;
     case 0x1B: c->msr.apic_base = v; return 0;
@@ -1253,6 +1257,7 @@ StepResult sys_step(CPU *c) {
     }
     c->rip = c->next_rip;
     c->icount++;
+    if (c->pmu.watch) pmu_retire(c, inp, old_cpl);
     if (!c->rf_keep) c->rflags &= ~FL_RF;
 
     if (tf || c->dbg_hits) {
@@ -1492,11 +1497,14 @@ void exec_system(CPU *c, const Insn *in) {
         }
         return;
     }
-    case I_RDPMC:
+    case I_RDPMC: {
+        uint64_t v = 0;
         if (c->sys && !(c->cr4 & CR4_PCE) && c->cpl > 0 && pmode(c)) fault(c, EXC_GP, 0);
-        setreg(c, RAX, 4, 1, 0);
-        setreg(c, RDX, 4, 1, 0);
+        if (c->sys && pmu_rdpmc(c, (uint32_t)c->r[RCX], &v)) fault(c, EXC_GP, 0);
+        setreg(c, RAX, 4, 1, v);
+        setreg(c, RDX, 4, 1, v >> 32);
         return;
+    }
     case I_SYSRET:
         if (!c->sys) fault(c, EXC_UD, 0);
         sys_sysret(c, (in->rex & 8) != 0);

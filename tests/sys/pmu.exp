@@ -1,0 +1,6 @@
+cpuid 0xa eax ebx edx 07300804 00000040 00000603 
+fixed0 instructions, rdpmc 000000cd 000000cd 
+branches, conditional, user-only 00000064 00000064 00000000 
+l1d misses, l2 misses 00000040 00000041 
+pmis, status in handler, status after, lvt 00000001 00000001 00000000 00010050 
+bye
