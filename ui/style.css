@@ -361,8 +361,10 @@ dialog select { background: var(--bg); border: 1px solid var(--border); border-r
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) { --st-m: #d6304f; --st-e: #1d9a5b; --st-s: #1f6fd6; --st-i: #c3cad4; }
 }
+#tab-cache { container-type: inline-size; }
 .cache-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
-@media (max-width: 900px) { .cache-grid { grid-template-columns: 1fr; } }
+.cache-grid > :first-child { min-width: 0; overflow-x: auto; } /* the statistics table scrolls rather than run under the side column */
+@container (max-width: 960px) { .cache-grid { grid-template-columns: minmax(0, 1fr); } }
 .cache-table { border-collapse: collapse; font: 12px var(--mono); width: 100%; }
 .cache-table th { text-align: right; font: 600 11px var(--sans); color: var(--muted); padding: 3px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .cache-table td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; font-variant-numeric: tabular-nums; }
