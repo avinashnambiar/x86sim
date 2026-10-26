@@ -2,12 +2,14 @@
  * serving the web UI. Binds to 127.0.0.1 only. */
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "cache.h"
@@ -15,6 +17,9 @@
 #include "pc.h"
 
 #define RUN_CHUNK 3000000ULL
+#define MAX_UPLOAD (1ULL << 30) /* request bodies: OS images uploaded to the library */
+
+static char os_dir[4096]; /* the OS image library: os/ next to ui/ */
 
 /* ---- JSON helpers ---- */
 
@@ -161,7 +166,16 @@ static void api_state(Machine *m, Buf *b) {
         if (i) buf_append(b, ",", 1);
         json_str(b, m->files[i]);
     }
-    buf_printf(b, "],\"syscalls\":%llu,\"view_cpu\":%d,\"cache\":%s,\"cpus\":[", (unsigned long long)m->syslog_count,
+    buf_printf(b, "],\"boot\":{");
+    const char *bn[] = {"kernel", "initrd", "append", "hda", "fda"};
+    const char *bv[] = {m->pc_kernel, m->pc_initrd, m->pc_append, m->pc_hda, m->pc_fda};
+    for (int i = 0, n = 0; i < 5; i++)
+        if (bv[i]) {
+            const char *slash = i == 2 ? NULL : strrchr(bv[i], '/');
+            buf_printf(b, "%s\"%s\":", n++ ? "," : "", bn[i]);
+            json_str(b, slash ? slash + 1 : bv[i]);
+        }
+    buf_printf(b, "},\"syscalls\":%llu,\"view_cpu\":%d,\"cache\":%s,\"cpus\":[", (unsigned long long)m->syslog_count,
                m->view_cpu, m->cache ? "true" : "false");
     for (int i = 0; i < m->ncpu; i++) {
         CPU *k = m->cpus[i];
@@ -510,6 +524,100 @@ static void api_error(Buf *b, const char *msg) {
     buf_printf(b, "}");
 }
 
+/* ---- OS image library ---- */
+
+/* Library files have flat names: letters, digits, '.', '-', '_', not starting with '.'. */
+static int os_name_ok(const char *n) {
+    if (!n[0] || n[0] == '.' || strlen(n) > 200) return 0;
+    for (const char *p = n; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '.' && *p != '-' && *p != '_') return 0;
+    return 1;
+}
+
+/* What a file is, from its first bytes: a Linux bzImage, an initramfs (cpio,
+ * possibly compressed), a bootable disk (boot signature; "floppy" when the size
+ * is a standard floppy's) or something else. */
+static const char *os_kind(const char *path, uint64_t size) {
+    uint8_t h[0x210] = {0};
+    FILE *f = fopen(path, "rb");
+    if (!f) return "other";
+    size_t n = fread(h, 1, sizeof h, f);
+    fclose(f);
+    if (n >= 0x206 && !memcmp(h + 0x202, "HdrS", 4)) return "kernel";
+    static const struct { const char *magic; size_t len; } ird[] = {
+        {"0707", 4}, {"\x1f\x8b", 2}, {"\xfd" "7zXZ", 5}, {"\x28\xb5\x2f\xfd", 4}, {"BZh", 3}, {"\x02\x21\x4c\x18", 4}, {"\x5d\0\0", 3}};
+    for (size_t i = 0; i < sizeof ird / sizeof ird[0]; i++)
+        if (n >= ird[i].len && !memcmp(h, ird[i].magic, ird[i].len)) return "initrd";
+    if (n >= 512 && h[510] == 0x55 && h[511] == 0xAA) {
+        static const uint64_t floppy[] = {368640, 737280, 1228800, 1474560, 2949120};
+        for (size_t i = 0; i < sizeof floppy / sizeof floppy[0]; i++)
+            if (size == floppy[i]) return "floppy";
+        return "disk";
+    }
+    return "other";
+}
+
+static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static void api_os(Buf *b) {
+    buf_printf(b, "{\"dir\":");
+    json_str(b, os_dir);
+    buf_printf(b, ",\"files\":[");
+    DIR *d = opendir(os_dir);
+    char *names[512];
+    int n = 0;
+    for (struct dirent *e; d && (e = readdir(d)) && n < 512;)
+        if (os_name_ok(e->d_name)) names[n++] = strdup(e->d_name);
+    if (d) closedir(d);
+    qsort(names, (size_t)n, sizeof names[0], cmp_str);
+    for (int i = 0, out = 0; i < n; i++) {
+        char path[4400];
+        struct stat st;
+        snprintf(path, sizeof path, "%s/%s", os_dir, names[i]);
+        if (!stat(path, &st) && S_ISREG(st.st_mode)) {
+            buf_printf(b, "%s{\"name\":", out++ ? "," : "");
+            json_str(b, names[i]);
+            buf_printf(b, ",\"size\":%llu,\"kind\":\"%s\"}", (unsigned long long)st.st_size,
+                       os_kind(path, (uint64_t)st.st_size));
+        }
+        free(names[i]);
+    }
+    buf_printf(b, "]}");
+}
+
+/* The library path of query parameter key, or NULL (absent or empty); *bad is
+ * set for a name that is not a library file. */
+static char *os_file(const char *q, const char *key, int *bad) {
+    char v[256], path[4400];
+    struct stat st;
+    if (!query_get(q, key, v, sizeof v) || !v[0]) return NULL;
+    snprintf(path, sizeof path, "%s/%s", os_dir, v);
+    if (!os_name_ok(v) || stat(path, &st) || !S_ISREG(st.st_mode)) {
+        *bad = 1;
+        return NULL;
+    }
+    return strdup(path);
+}
+
+/* body: the file; name= its library name. Written beside the target, then renamed. */
+static void api_upload(const char *q, const char *body, size_t len, Buf *b) {
+    char name[256], tmp[4400], path[4400];
+    if (!query_get(q, "name", name, sizeof name) || !os_name_ok(name))
+        return api_error(b, "name= must be a plain file name (letters, digits, '.', '-', '_')");
+    mkdir(os_dir, 0755);
+    snprintf(path, sizeof path, "%s/%s", os_dir, name);
+    snprintf(tmp, sizeof tmp, "%s/.upload-%s", os_dir, name);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return api_error(b, "cannot write to the OS library");
+    int ok = fwrite(body, 1, len, f) == len;
+    ok &= fclose(f) == 0;
+    if (!ok || rename(tmp, path)) {
+        unlink(tmp);
+        return api_error(b, "cannot write to the OS library");
+    }
+    api_os(b);
+}
+
 static void handle_api(Machine *m, const char *method, const char *path, const char *q, const char *body,
                        size_t bodylen, Buf *b) {
     int post = !strcmp(method, "POST");
@@ -526,6 +634,7 @@ static void handle_api(Machine *m, const char *method, const char *path, const c
     if (!strcmp(path, "/api/screen")) return pc_screen(m, b);
     if (!strcmp(path, "/api/cache")) return api_cache(m, q, b);
     if (!strcmp(path, "/api/cachelines")) return api_cachelines(m, q, b);
+    if (!strcmp(path, "/api/os")) return api_os(b);
     if (!post) return api_error(b, "unknown endpoint or method");
 
     if (!strcmp(path, "/api/step")) {
@@ -595,6 +704,53 @@ static void handle_api(Machine *m, const char *method, const char *path, const c
         machine_destroy(m);
         *m = fresh;
         machine_rebind(m);
+    } else if (!strcmp(path, "/api/boot")) {
+        /* a fresh PC booting an OS from the library: kernel= (initrd=, append=) or
+         * hda=/fda= disk images (boot=a|c); smp=, cache=0|1, ram= MB */
+        char err[512], app[1024] = "", drive[8] = "";
+        int bad = 0;
+        uint64_t smp = query_u64(q, "smp", (uint64_t)m->ncpu), ram = query_u64(q, "ram", m->pc_ram_mb);
+        if (smp < 1 || smp > MAX_CPUS) return api_error(b, "smp= must be 1 to 255");
+        if (ram && (ram < 16 || ram > 3072)) return api_error(b, "ram= must be 16 to 3072 MB");
+        char *kernel = os_file(q, "kernel", &bad), *initrd = os_file(q, "initrd", &bad);
+        char *hda = os_file(q, "hda", &bad), *fda = os_file(q, "fda", &bad);
+        query_get(q, "append", app, sizeof app);
+        query_get(q, "boot", drive, sizeof drive);
+        const char *why = bad ? "no such file in the OS library" : !kernel && !hda && !fda ? "choose a kernel or a disk image"
+                        : initrd && !kernel ? "an initrd needs a kernel" : NULL;
+        if (!why) {
+            Machine fresh;
+            machine_init(&fresh);
+            fresh.echo_output = 0;
+            fresh.use_host_stdin = 0;
+            fresh.yield_on_idle = 1;
+            fresh.pc_mode = 1;
+            fresh.pc_ram_mb = ram;
+            fresh.pc_smp = (int)smp;
+            fresh.pc_cache = query_u64(q, "cache", (uint64_t)m->pc_cache) != 0;
+            fresh.pc_kernel = kernel;
+            fresh.pc_initrd = initrd;
+            fresh.pc_append = kernel && app[0] ? strdup(app) : NULL;
+            fresh.pc_hda = hda;
+            fresh.pc_fda = fda;
+            fresh.pc_boot = drive[0] == 'a' || drive[0] == 'c' ? drive[0] : 0;
+            char *av[1] = {"pc"};
+            if (!machine_load(&fresh, 0, NULL, 1, av, 0, err, sizeof err)) {
+                /* the strings stay with the machine (reset reloads them) */
+                machine_destroy(m);
+                *m = fresh;
+                machine_rebind(m);
+                api_state(m, b);
+                return;
+            }
+            free(fresh.pc_append);
+            machine_destroy(&fresh);
+            why = err;
+        }
+        free(kernel), free(initrd), free(hda), free(fda);
+        return api_error(b, why);
+    } else if (!strcmp(path, "/api/upload")) {
+        return api_upload(q, body, bodylen, b);
     } else if (!strcmp(path, "/api/asm")) {
         /* body: assembly source; bits=16|32|64, syntax=att|intel, cpu=N (-1: memory only), addr=hex;
          * check=1 only assembles */
@@ -767,9 +923,10 @@ static void handle_conn(Machine *m, int fd, const char *ui_dir) {
             }
         }
         if (hdr_end && req.len >= hdr_end + content_len) break;
-        if (req.len > (1 << 20)) break;
+        if (hdr_end ? content_len > MAX_UPLOAD : req.len > (1 << 20)) break;
     }
-    if (!hdr_end) {
+    if (!hdr_end || req.len < hdr_end + content_len) {
+        if (hdr_end) respond(fd, 400, "text/plain", "request too large or incomplete", 31);
         buf_free(&req);
         return;
     }
@@ -806,6 +963,9 @@ int run_server(Machine *m, int port, const char *ui_dir) {
         return 1;
     }
     listen(s, 16);
+    char lib[4400];
+    snprintf(lib, sizeof lib, "%s/../os", ui_dir);
+    if (!realpath(lib, os_dir)) snprintf(os_dir, sizeof os_dir, "%s", lib);
     printf("x86sim web UI: http://127.0.0.1:%d/   (serving %s, Ctrl-C to quit)\n", port, ui_dir);
     fflush(stdout);
     for (;;) {

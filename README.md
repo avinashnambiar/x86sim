@@ -69,7 +69,13 @@ byte to port 0xF4 exits with that code.
 - **Stack** view with return addresses resolved to `function+offset`.
 - **Memory** hex view; accepts hex, symbols, registers and `reg+off`.
 - **Console** shows program output and takes stdin — the program pauses in
-  `read()` until you type a line.
+  `read()` until you type a line. It is a small terminal (colours, cursor
+  movement, line editing): click it and type to send keys directly.
+- **Boot OS** replaces the machine with a PC booting a Linux kernel (with an
+  initrd and command line) or a disk image from the OS library, `os/`, with a
+  chosen number of CPUs, memory and caches. **Add files…** copies images into
+  the library; `os/get-alpine.sh` fills it with Alpine Linux, which boots to a
+  shell you use from the Console tab.
 - **System calls**, **Trace** (last executed instructions), **Memory map**,
   **Symbols** tabs.
 - In PC mode: a **Screen** tab (VGA text and mode 13h; click it and type to

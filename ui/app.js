@@ -89,8 +89,10 @@ function resolveLocal(expr) {
 /* ---------- rendering ---------- */
 
 function renderHeader(st) {
-  $('program').textContent = st.program.join(' ');
-  $('program').title = st.program.join('\n');
+  const b = st.boot || {};
+  const what = st.program.length ? st.program : b.kernel ? [b.kernel + (b.initrd ? ' + ' + b.initrd : '')] : [b.hda || b.fda].filter(Boolean);
+  $('program').textContent = what.join(' ');
+  $('program').title = what.join('\n') + (b.append ? '\n' + b.append : '');
   if (st.sys) {
     const names = { real: 'real mode', vm86: 'virtual-8086', protected: '32-bit protected', compat: 'compatibility mode', long: '64-bit long mode' };
     const vmx = st.sys.vmx === 'guest' ? ' · VMX guest' : st.sys.vmx === 'root' ? ' · VMX root' : '';
@@ -103,7 +105,7 @@ function renderHeader(st) {
   renderCpus(st);
   if (st.os === 'pc' && !S.screenShown) {
     S.screenShown = true;
-    selectTab('screen');
+    selectTab(b.kernel ? 'console' : 'screen'); /* Linux talks on the serial port */
   }
   const state = S.running ? 'running' : st.state;
   const pill = $('state');
@@ -577,27 +579,213 @@ async function renderMem() {
   }
 }
 
+/* ---------- console terminal ---------- */
+
+/* The console is a small terminal: it understands the escape sequences a Linux
+ * shell sends over the serial port (colours, cursor moves, erasing), decodes
+ * UTF-8 and keeps the last TERM_MAX lines. Rows are re-rendered only when they
+ * change. */
+const TERM_MAX = 5000, TERM_ROWS = 24;
+const term = {
+  el: $('console'),
+  reset() {
+    this.lines = [[]];      // rows of [char, class] cells
+    this.rows = [];         // their <div>s
+    this.r = 0;
+    this.c = 0;
+    this.saved = [0, 0];
+    this.fg = -1; this.bg = -1; this.bold = false; this.inv = false;
+    this.cls = '';
+    this.esc = '';          // an escape sequence still being received
+    this.dirty = new Set([0]);
+    this.dec = new TextDecoder('utf-8');
+    this.el.textContent = '';
+  },
+  style() {
+    let fg = this.fg, bg = this.bg;
+    if (this.bold && fg >= 0 && fg < 8) fg += 8;
+    const c = [];
+    if (this.inv) c.push('t-inv');
+    if (fg >= 0) c.push('t-f' + fg);
+    if (bg >= 0) c.push('t-b' + bg);
+    if (this.bold) c.push('t-bold');
+    this.cls = c.join(' ');
+  },
+  line(r) {
+    while (this.lines.length <= r) this.lines.push([]);
+    this.dirty.add(r);
+    return this.lines[r];
+  },
+  moveTo(r, c) {
+    this.dirty.add(this.r);
+    this.r = Math.max(0, r);
+    this.c = Math.max(0, c);
+    this.line(this.r);
+  },
+  top() { return Math.max(0, this.lines.length - TERM_ROWS); },
+  put(ch, cls) {
+    const l = this.line(this.r);
+    while (l.length < this.c) l.push([' ', '']);
+    l[this.c++] = [ch, cls ?? this.cls];
+  },
+  sgr(ps) {
+    for (let i = 0; i < ps.length; i++) {
+      const p = ps[i];
+      if (p === 0) { this.fg = this.bg = -1; this.bold = this.inv = false; }
+      else if (p === 1) this.bold = true;
+      else if (p === 22) this.bold = false;
+      else if (p === 7) this.inv = true;
+      else if (p === 27) this.inv = false;
+      else if (p >= 30 && p <= 37) this.fg = p - 30;
+      else if (p >= 90 && p <= 97) this.fg = p - 82;
+      else if (p === 39) this.fg = -1;
+      else if (p >= 40 && p <= 47) this.bg = p - 40;
+      else if (p >= 100 && p <= 107) this.bg = p - 92;
+      else if (p === 49) this.bg = -1;
+      else if ((p === 38 || p === 48) && ps[i + 1] === 5) { /* 256 colours: keep the first 16 */
+        const n = ps[i + 2];
+        if (n < 16) p === 38 ? (this.fg = n) : (this.bg = n);
+        i += 2;
+      } else if ((p === 38 || p === 48) && ps[i + 1] === 2) i += 4;
+    }
+    this.style();
+  },
+  csi(seq) {
+    const fin = seq[seq.length - 1], priv = seq[0] === '?';
+    const ps = seq.slice(priv ? 1 : 0, -1).split(';').map((x) => (x === '' ? NaN : Number(x)));
+    const n = (i, d = 1) => (Number.isNaN(ps[i]) || ps[i] === undefined ? d : ps[i]) || d;
+    if (priv) return; /* modes (cursor visibility, wrapping, ...) */
+    const l = this.lines[this.r];
+    switch (fin) {
+      case 'm': this.sgr(ps.map((x) => (Number.isNaN(x) ? 0 : x))); break;
+      case 'A': this.moveTo(Math.max(this.top(), this.r - n(0)), this.c); break;
+      case 'B': this.moveTo(this.r + n(0), this.c); break;
+      case 'C': this.moveTo(this.r, this.c + n(0)); break;
+      case 'D': this.moveTo(this.r, this.c - n(0)); break;
+      case 'G': this.moveTo(this.r, n(0) - 1); break;
+      case 'H': case 'f': this.moveTo(this.top() + n(0) - 1, n(1) - 1); break;
+      case 'K': {
+        const mode = n(0, 0);
+        if (mode === 0) l.length = Math.min(l.length, this.c);
+        else if (mode === 1) for (let i = 0; i <= this.c && i < l.length; i++) l[i] = [' ', ''];
+        else l.length = 0;
+        this.dirty.add(this.r);
+        break;
+      }
+      case 'J': {
+        const mode = n(0, 0);
+        if (mode >= 2) { /* clear the screen: start afresh below what was there */
+          const keep = this.lines.length;
+          this.line(keep + TERM_ROWS - 1);
+          this.moveTo(keep, this.c);
+          for (let i = keep; i < this.lines.length; i++) this.lines[i] = [];
+        } else if (mode === 0) {
+          l.length = Math.min(l.length, this.c);
+          for (let i = this.r + 1; i < this.lines.length; i++) { this.lines[i] = []; this.dirty.add(i); }
+        }
+        this.dirty.add(this.r);
+        break;
+      }
+      case 'P': l.splice(this.c, n(0)); this.dirty.add(this.r); break;
+      case '@': l.splice(this.c, 0, ...Array.from({ length: n(0) }, () => [' ', ''])); this.dirty.add(this.r); break;
+      case 'X': for (let i = 0; i < n(0); i++) if (l[this.c + i]) l[this.c + i] = [' ', '']; this.dirty.add(this.r); break;
+      default: break; /* reports, scroll regions: ignored */
+    }
+  },
+  /* raw: one character per output byte, as /api/output sends it */
+  write(raw, cls) {
+    const text = this.dec.decode(Uint8Array.from(raw, (ch) => ch.charCodeAt(0) & 255), { stream: true });
+    for (const ch of text) {
+      if (this.esc) {
+        this.esc += ch;
+        const e = this.esc;
+        if (e.length === 2 && e !== '\x1b[' && e !== '\x1b]') {
+          if (e === '\x1b7') this.saved = [this.r, this.c];
+          else if (e === '\x1b8') this.moveTo(this.saved[0], this.saved[1]);
+          else if (e === '\x1bc') { const keep = this.el; this.reset(); this.el = keep; }
+          if (!'()'.includes(ch)) this.esc = ''; /* ESC ( B: charset, one more byte */
+        } else if (e.length === 3 && '()'.includes(e[1])) this.esc = '';
+        else if (e[1] === '[' && e.length > 2 && ch >= '@' && ch <= '~') { this.esc = ''; this.csi(e.slice(2)); }
+        else if (e[1] === ']' && (ch === '\x07' || e.endsWith('\x1b\\'))) this.esc = '';
+        else if (e.length > 64) this.esc = '';
+        continue;
+      }
+      const code = ch.codePointAt(0);
+      if (ch === '\x1b') this.esc = ch;
+      else if (ch === '\n') this.moveTo(this.r + 1, 0); /* the terminal does the carriage return too */
+      else if (ch === '\r') this.moveTo(this.r, 0);
+      else if (ch === '\b') this.moveTo(this.r, this.c - 1);
+      else if (ch === '\t') this.moveTo(this.r, (this.c & ~7) + 8);
+      else if (code >= 32 && code !== 127) this.put(ch, cls);
+    }
+  },
+  /* a note from the debugger (exit status), on a line of its own */
+  note(text, cls) {
+    if (this.c) this.moveTo(this.r + 1, 0);
+    for (const ch of text) this.put(ch, cls);
+    this.moveTo(this.r + 1, 0);
+  },
+  flush() {
+    if (this.lines.length > TERM_MAX) {
+      const k = this.lines.length - TERM_MAX + 1000;
+      this.lines.splice(0, k);
+      for (const d of this.rows.splice(0, k)) d.remove();
+      this.r = Math.max(0, this.r - k);
+      this.saved[0] = Math.max(0, this.saved[0] - k);
+      this.dirty = new Set([...this.dirty].map((i) => i - k).filter((i) => i >= 0));
+    }
+    this.dirty.add(this.r);
+    if (this.cur !== undefined && this.cur < this.lines.length) this.dirty.add(this.cur);
+    this.cur = this.r;
+    while (this.rows.length < this.lines.length) {
+      const d = document.createElement('div');
+      this.el.appendChild(d);
+      this.rows.push(d);
+    }
+    for (const i of this.dirty) {
+      if (i >= this.lines.length) continue;
+      const l = this.lines[i];
+      let html = '', run = '', cls = null;
+      const end = () => { if (run) html += cls ? `<span class="${cls}">${esc(run)}</span>` : esc(run); run = ''; };
+      const len = i === this.r ? Math.max(l.length, this.c + 1) : l.length;
+      for (let k = 0; k < len; k++) {
+        const [ch, c] = l[k] || [' ', ''];
+        if (i === this.r && k === this.c) {
+          end();
+          html += `<span class="tcur${c ? ' ' + c : ''}">${esc(ch)}</span>`;
+          cls = null;
+          continue;
+        }
+        if (c !== cls) { end(); cls = c; }
+        run += ch;
+      }
+      end();
+      this.rows[i].innerHTML = html;
+    }
+    this.dirty.clear();
+  },
+};
+term.reset();
+
 async function renderOutput(st) {
   if (st.out_len < S.outLen) {
     S.outLen = 0;
-    $('console').textContent = '';
+    term.reset();
   }
-  const con = $('console');
+  const body = $('tab-console');
+  const atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
   if (st.out_len > S.outLen) {
     const res = await api(`/api/output?from=${S.outLen}`);
-    con.appendChild(document.createTextNode(res.text));
+    term.write(res.text);
     S.outLen = res.len;
   }
   const key = `${st.state}:${st.status}`;
   if ((st.state === 'exited' || st.state === 'fault' || st.state === 'halted') && S.announced !== key) {
     S.announced = key;
-    const span = document.createElement('span');
-    span.className = st.state === 'fault' ? 'err' : 'exit';
-    span.textContent = `${con.textContent && !con.textContent.endsWith('\n') ? '\n' : ''}[${st.status}]\n`;
-    con.appendChild(span);
+    term.note(`[${st.status}]`, st.state === 'fault' ? 'err' : 'exit');
   }
-  const body = $('tab-console');
-  body.scrollTop = body.scrollHeight;
+  term.flush();
+  if (atEnd || S.running) body.scrollTop = body.scrollHeight;
 }
 
 /* ---------- PC screen ---------- */
@@ -687,17 +875,29 @@ function keyBytes(e) {
   return null;
 }
 
-$('screen').addEventListener('keydown', async (e) => {
-  const bytes = keyBytes(e);
-  if (bytes === null) return;
-  e.preventDefault();
-  e.stopPropagation();
+async function sendKeys(bytes) {
   try {
     await post('/api/input', bytes);
     if (!S.running) runLoop();
   } catch (err) {
     toast(err.message);
   }
+}
+/* the Screen tab and the console both take keystrokes (the console also takes pastes) */
+for (const id of ['screen', 'console']) {
+  $(id).addEventListener('keydown', (e) => {
+    let bytes = keyBytes(e);
+    if (bytes === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (bytes === '\r' && S.st && S.st.os !== 'pc') bytes = '\n'; /* a user-mode program reads lines */
+    sendKeys(bytes);
+  });
+}
+$('console').addEventListener('paste', (e) => {
+  const text = e.clipboardData.getData('text');
+  e.preventDefault();
+  if (text) sendKeys(text.replace(/\r?\n/g, '\r'));
 });
 
 async function renderTab() {
@@ -873,7 +1073,7 @@ $('btn-reset').onclick = async () => {
   S.announced = '';
   S.symbols = null;
   S.memPrev = null;
-  $('console').textContent = '';
+  term.reset();
   await act('/api/reset');
   S.prev = null;
   renderRegs(S.st);
@@ -985,15 +1185,174 @@ $('load-ok').addEventListener('click', async (e) => {
     S.symbols = null;
     S.prev = null;
     S.memPrev = null;
-    $('console').textContent = '';
+    term.reset();
     await refresh(st);
   } catch (err) {
     $('load-error').textContent = err.message;
   }
 });
 
+/* ---------- Boot OS ---------- */
+
+const BOOT_APPEND = 'console=ttyS0 earlyprintk=serial'; /* the BIOS's default command line */
+const bootSrc = () => document.querySelector('input[name="boot-src"]:checked').value;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function stopRun() {
+  if (!S.running) return;
+  S.pause = true;
+  while (S.running) await sleep(30);
+}
+
+function bootPrefs() {
+  try { return JSON.parse(localStorage.getItem('x86sim.boot')) || {}; } catch { return {}; }
+}
+
+/* fill the choices from the library, keeping the current (or remembered) picks */
+function bootFill(lib, want) {
+  const files = lib.files;
+  const opts = (list, none) => (none ? `<option value="">${none}</option>` : '') +
+    list.map((f) => `<option value="${esc(f.name)}">${esc(f.name)} (${(f.size / 1048576).toFixed(1)} MB)</option>`).join('');
+  const pick = (id, v) => {
+    const sel = $(id);
+    if (v !== undefined && [...sel.options].some((o) => o.value === v)) sel.value = v;
+  };
+  const kernels = files.filter((f) => f.kind === 'kernel');
+  const initrds = files.filter((f) => f.kind === 'initrd');
+  const disks = files.filter((f) => f.kind === 'disk' || f.kind === 'floppy');
+  $('boot-kernel').innerHTML = kernels.length ? opts(kernels) : '<option value="">no kernels in the library</option>';
+  $('boot-initrd').innerHTML = opts(initrds, 'none');
+  $('boot-image').innerHTML = disks.length ? opts(disks) : '<option value="">no disk images in the library</option>';
+  $('boot-initrd').value = initrds.some((f) => f.name === 'initrd.cpio') ? 'initrd.cpio' : initrds[0] ? initrds[0].name : '';
+  pick('boot-kernel', want.kernel);
+  pick('boot-initrd', want.initrd);
+  pick('boot-image', want.image);
+  $('boot-dir').textContent = lib.dir;
+  $('boot-empty').classList.toggle('hidden', kernels.length + disks.length > 0);
+  S.bootLib = lib;
+}
+
+function bootSetSrc(src) {
+  document.querySelector(`input[name="boot-src"][value="${src}"]`).checked = true;
+  $('boot-kernel-fields').classList.toggle('hidden', src !== 'kernel');
+  $('boot-disk-fields').classList.toggle('hidden', src !== 'disk');
+}
+
+/* a floppy-sized image goes in drive A: */
+function bootDriveFor(name) {
+  const f = S.bootLib && S.bootLib.files.find((x) => x.name === name);
+  if (f) $('boot-drive').value = f.kind === 'floppy' ? 'a' : 'c';
+}
+
+$('btn-boot').onclick = async () => {
+  $('boot-error').textContent = '';
+  $('boot-upmsg').textContent = '';
+  const st = S.st || {}, b = st.boot || {}, prefs = bootPrefs();
+  /* the running machine's choices first, then the last boot's */
+  const cur = b.kernel ? { kernel: b.kernel, initrd: b.initrd || '', image: prefs.image } :
+    { kernel: prefs.kernel, initrd: prefs.initrd, image: b.hda || b.fda || prefs.image };
+  try {
+    bootFill(await api('/api/os'), cur);
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  bootSetSrc(b.hda || b.fda || (!b.kernel && prefs.src === 'disk') ? 'disk' : 'kernel');
+  $('boot-append').value = b.kernel ? b.append || BOOT_APPEND : prefs.append || BOOT_APPEND;
+  if (b.fda || b.hda) $('boot-drive').value = b.fda ? 'a' : 'c';
+  else if (prefs.drive) $('boot-drive').value = prefs.drive;
+  else bootDriveFor($('boot-image').value);
+  $('boot-smp').value = st.cpus ? st.cpus.length : prefs.smp || 2;
+  $('boot-cache').checked = st.os === 'pc' ? !!st.cache : !!prefs.cache;
+  $('boot-ram').value = prefs.ram || 256;
+  $('boot-dialog').showModal();
+};
+document.querySelectorAll('input[name="boot-src"]').forEach((r) => r.addEventListener('change', () => bootSetSrc(bootSrc())));
+$('boot-image').addEventListener('change', () => bootDriveFor($('boot-image').value));
+
+$('boot-add').onclick = () => $('boot-file').click();
+$('boot-file').addEventListener('change', async (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  let last = null;
+  for (const f of files) {
+    const name = f.name.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'image';
+    if (S.bootLib.files.some((x) => x.name === name) && !confirm(`Replace ${name} in the OS library?`)) continue;
+    $('boot-upmsg').textContent = `Copying ${name} (${(f.size / 1048576).toFixed(1)} MB)…`;
+    $('boot-add').disabled = true;
+    try {
+      const lib = await api('/api/upload?name=' + encodeURIComponent(name), { method: 'POST', body: f });
+      const added = lib.files.find((x) => x.name === name);
+      const want = { kernel: $('boot-kernel').value, initrd: $('boot-initrd').value, image: $('boot-image').value };
+      if (added.kind === 'kernel') want.kernel = name;
+      else if (added.kind === 'initrd') want.initrd = name;
+      else if (added.kind === 'disk' || added.kind === 'floppy') want.image = name;
+      bootFill(lib, want);
+      if (added.kind === 'kernel' || added.kind === 'initrd') bootSetSrc('kernel');
+      else if (want.image === name) { bootSetSrc('disk'); bootDriveFor(name); }
+      last = added;
+    } catch (err) {
+      $('boot-error').textContent = `${name}: ${err.message}`;
+    } finally {
+      $('boot-add').disabled = false;
+    }
+  }
+  if (last) $('boot-upmsg').textContent = last.kind === 'other'
+    ? `Added ${last.name}, but it is not a kernel, initrd or bootable disk image.`
+    : `Added ${last.name} (${last.kind === 'floppy' ? 'floppy image' : last.kind === 'disk' ? 'disk image' : last.kind}).`;
+  else $('boot-upmsg').textContent = '';
+});
+
+$('boot-ok').addEventListener('click', async (e) => {
+  e.preventDefault();
+  const src = bootSrc();
+  const q = new URLSearchParams({
+    smp: Math.max(1, Math.min(255, Number($('boot-smp').value) || 1)),
+    ram: Math.max(16, Math.min(3072, Number($('boot-ram').value) || 256)),
+    cache: $('boot-cache').checked ? 1 : 0,
+  });
+  const prefs = { src, smp: q.get('smp'), ram: q.get('ram'), cache: $('boot-cache').checked };
+  if (src === 'kernel') {
+    if (!$('boot-kernel').value) { $('boot-error').textContent = 'Choose a kernel, or add one with Add files.'; return; }
+    q.set('kernel', $('boot-kernel').value);
+    if ($('boot-initrd').value) q.set('initrd', $('boot-initrd').value);
+    q.set('append', $('boot-append').value.trim() || BOOT_APPEND);
+    Object.assign(prefs, { kernel: q.get('kernel'), initrd: $('boot-initrd').value, append: q.get('append') });
+  } else {
+    if (!$('boot-image').value) { $('boot-error').textContent = 'Choose a disk image, or add one with Add files.'; return; }
+    const drive = $('boot-drive').value;
+    q.set(drive === 'a' ? 'fda' : 'hda', $('boot-image').value);
+    q.set('boot', drive);
+    Object.assign(prefs, { image: $('boot-image').value, drive });
+  }
+  $('boot-ok').disabled = true;
+  try {
+    await stopRun();
+    const st = await post('/api/boot?' + q);
+    try { localStorage.setItem('x86sim.boot', JSON.stringify(prefs)); } catch { /* ignore */ }
+    $('boot-dialog').close();
+    S.outLen = 0;
+    S.announced = '';
+    S.symbols = null;
+    S.prev = null;
+    S.memPrev = null;
+    S.screenShown = true;
+    ED.ncpu = 0;
+    term.reset();
+    setView('disasm');
+    selectTab(src === 'kernel' ? 'console' : 'screen');
+    await refresh(st);
+    $(src === 'kernel' ? 'console' : 'screen').focus();
+    runLoop();
+  } catch (err) {
+    $('boot-error').textContent = err.message;
+  } finally {
+    $('boot-ok').disabled = false;
+  }
+});
+
 document.addEventListener('keydown', (e) => {
-  const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName) || document.activeElement.id === 'screen';
+  const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName) || ['screen', 'console'].includes(document.activeElement.id);
   if (e.key === 'F10') { e.preventDefault(); act('/api/next'); }
   else if (e.key === 'F11' && e.shiftKey) { e.preventDefault(); act('/api/finish'); }
   else if (e.key === 'F11') { e.preventDefault(); act('/api/step'); }

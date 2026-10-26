@@ -151,6 +151,7 @@
         <li><a href="#pc">The PC machine</a></li>
         <li class="sub"><a href="#pc-devices">Devices</a></li>
         <li class="sub"><a href="#pc-ports">Special I/O ports</a></li>
+        <li class="sub"><a href="#pc-boot-ui">Booting an OS from the debugger</a></li>
         <li class="sub"><a href="#pc-linux">Booting Linux and disks</a></li>
         <li><a href="#smp">Multiple CPUs</a></li>
         <li><a href="#caches">Caches and MESI</a></li>
@@ -194,9 +195,11 @@
 
 ./x86cc --ui tests/c/algo.c             <span class="c"># compile a C program and open it in this debugger</span>
 ./x86sim -u --smp 4 --cache             <span class="c"># an empty 4-CPU PC: write assembly in the Editor</span>
-./x86sim --kernel bzImage --initrd initrd.cpio   <span class="c"># boot Linux on the serial console</span></code></pre>
+os/get-alpine.sh                        <span class="c"># download Alpine Linux into os/ (once)</span>
+./x86sim --kernel os/bzImage --initrd os/initrd.cpio   <span class="c"># boot it to a shell on the serial console</span></code></pre>
       <p>The web debugger listens on <a href="http://127.0.0.1:8086">http://127.0.0.1:8086</a> (only on
-        the local machine). Use <code>-p N</code> to choose another port.</p>
+        the local machine). Use <code>-p N</code> to choose another port. To boot Linux from there, press
+        <b>Boot OS</b> (see <a href="#pc-boot-ui">Booting an OS from the debugger</a>).</p>
 
       <h2 id="running">Running programs</h2>
       <h3 id="inputs">What it can run</h3>
@@ -266,6 +269,7 @@
         <tr><td>Pause</td><td><kbd>F6</kbd></td><td>Stop a running program.</td></tr>
         <tr><td>Reset</td><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Restart. In PC mode, it also reloads every program loaded from the editor.</td></tr>
         <tr><td>Load</td><td></td><td>Load another program: paths of files on this machine, arguments, and the mode.</td></tr>
+        <tr><td>Boot OS</td><td></td><td>Replace the machine with a PC that boots a Linux kernel or a disk image from the OS library (see <a href="#pc-boot-ui">below</a>).</td></tr>
       </table></div>
       <p>The status pill shows the state: <i>paused</i>, <i>running</i>, <i>needs input</i> (the program
         waits in <code>read()</code>), <i>halted</i>, <i>exited</i> or <i>fault</i>. Next to it are the
@@ -293,7 +297,7 @@
       <div class="tw"><table>
         <tr><th>Tab</th><th>Shows</th></tr>
         <tr><td>Screen</td><td>PC mode: the VGA text screen and mode 13h graphics. Click it and type to send keystrokes.</td></tr>
-        <tr><td>Console</td><td>Program output, or output written to port 0xE9 in PC mode. Type here to give a program its input.</td></tr>
+        <tr><td>Console</td><td>Program output, the PC's serial port, or output written to port 0xE9. It is a small terminal: it shows colours and handles the cursor movement a shell's line editing sends. Click it and type to send keys straight to the program or OS (paste works too), or type a whole line in the box below it.</td></tr>
         <tr><td>System calls</td><td>The program's recent system calls, with a count in the tab title.</td></tr>
         <tr><td>Trace</td><td>The most recently executed instructions. Click one to show it in the disassembly.</td></tr>
         <tr><td>Memory map</td><td>The memory regions: address range, protection and name.</td></tr>
@@ -376,9 +380,33 @@
         <tr><td><code>0xEC</code>, <code>0xED</code></td><td>Query the cache state of a line (see <a href="#caches-port">below</a>).</td></tr>
         <tr><td><code>0xB2</code></td><td>Raises an SMI on the writing CPU (see <a href="#smm">SMM</a>).</td></tr>
       </table></div>
+      <h3 id="pc-boot-ui">Booting an OS from the debugger</h3>
+      <p><b>Boot OS</b> in the toolbar replaces the machine with a fresh PC that boots an operating system.
+        Images come from the <b>OS library</b>, the <code>os/</code> folder next to <code>ui/</code>. To
+        fill it with Alpine Linux (a 6.6 kernel plus a BusyBox userland in an initramfs), run once:</p>
+      <pre><code>os/get-alpine.sh                        <span class="c"># writes os/bzImage and os/initrd.cpio</span></code></pre>
+      <ol>
+        <li>Choose <b>Linux kernel</b> and pick the kernel (any bzImage), an initial RAM disk (or none) and
+          the kernel command line. The default, <code>console=ttyS0 earlyprintk=serial</code>, sends the
+          console to the serial port, which the Console tab shows.</li>
+        <li>Or choose <b>Disk image</b> and pick a bootable hard disk or floppy image. Floppy-sized images go
+          in drive A: by default. Guest writes stay in memory; the file never changes.</li>
+        <li>Set the CPUs (1–255), the memory and whether to simulate caches, then press <b>Boot</b>.</li>
+      </ol>
+      <p>The machine starts running at once. A Linux boot opens the Console tab: Alpine reaches its shell in
+        about a minute and a half on 2 CPUs. Click the console and type, as in a terminal; <kbd>Ctrl</kbd>+<kbd>C</kbd>,
+        <kbd>Tab</kbd> completion and the arrow keys work. Typing <code>exit</code> restarts the PC, which
+        ends the run (<i>system reset requested</i>); <b>Reset</b> boots it again.
+        A disk boot opens the Screen tab instead.</p>
+      <p><b>Add files…</b> copies kernels, initrds and disk images from your computer into the library. The
+        dialog tells kernels (the bzImage header), initrds (cpio, or gzip, xz, zstd, bzip2, lz4 or LZMA
+        compressed) and bootable disks (the 0x55AA boot signature) apart. The debugger still works while an
+        OS runs: <b>Pause</b> stops all CPUs, and the panels show the kernel's code, registers and memory.
+        <b>Reset</b> boots the same OS again. The dialog remembers the last choices.</p>
+
       <h3 id="pc-linux">Booting Linux and disks</h3>
-      <pre><code>./x86sim --kernel bzImage --initrd initrd.cpio --append "console=ttyS0"
-./x86sim --smp 8 --cache --kernel bzImage --initrd initrd.cpio
+      <pre><code>./x86sim --kernel os/bzImage --initrd os/initrd.cpio --append "console=ttyS0"
+./x86sim --smp 8 --cache --kernel os/bzImage --initrd os/initrd.cpio
 ./x86sim --hda disk.img                 <span class="c"># boot from a hard disk image</span>
 ./x86sim --fda floppy.img --boot a      <span class="c"># boot from a floppy</span>
 ./x86sim --pc boot.o                    <span class="c"># your own boot sector, linked at 0x7C00</span></code></pre>

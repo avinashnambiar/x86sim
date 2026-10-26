@@ -21,6 +21,7 @@
       <button id="btn-pause" title="Pause (F6)" disabled><span class="ico">&#10073;&#10073;</span>Pause</button>
       <button id="btn-reset" title="Reset (Ctrl+R)"><span class="ico">&#8635;</span>Reset</button>
       <button id="btn-load" title="Load another program"><span class="ico">&#128194;</span>Load</button>
+      <button id="btn-boot" title="Boot an operating system: a Linux kernel or a disk image"><span class="ico">&#128187;</span>Boot OS</button>
       <a class="guide-link" href="guide.html" target="_blank" rel="noopener" title="How to use x86sim (opens in a new tab)"><span class="ico">?</span>Guide</a>
     </div>
     <div class="status">
@@ -128,11 +129,11 @@
         <div class="screen-hint muted">Click the screen and type: keys go to the PC keyboard and serial port.</div>
       </div>
       <div class="tab-body scroll" id="tab-console">
-        <pre id="console" class="console"></pre>
+        <pre id="console" class="console" tabindex="0" aria-label="Console: click and type to send keys to the program or OS"></pre>
       </div>
       <form id="input-form" class="input-row">
         <span class="prompt">stdin&gt;</span>
-        <input id="stdin" placeholder="type input for the program and press Enter" spellcheck="false" autocomplete="off">
+        <input id="stdin" placeholder="type a line and press Enter, or click the console above and type there" spellcheck="false" autocomplete="off">
       </form>
       <div class="tab-body scroll hidden" id="tab-syscalls"><div id="syscalls" class="list"></div></div>
       <div class="tab-body scroll hidden" id="tab-trace"><div id="trace" class="list"></div></div>
@@ -200,6 +201,41 @@
       <div class="dialog-buttons">
         <button value="cancel" formnovalidate>Cancel</button>
         <button id="load-ok" class="primary" value="ok">Load</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="boot-dialog">
+    <form method="dialog" id="boot-form">
+      <h3>Boot an operating system</h3>
+      <p class="dialog-note">Images come from the OS library, <code id="boot-dir"></code>. <span id="boot-empty" class="hidden">It is empty: run <code>os/get-alpine.sh</code> in a terminal to download Alpine Linux, or add your own files below.</span></p>
+      <div class="boot-src" role="radiogroup" aria-label="Boot from">
+        <label><input type="radio" name="boot-src" value="kernel" checked> Linux kernel</label>
+        <label><input type="radio" name="boot-src" value="disk"> Disk image</label>
+      </div>
+      <div id="boot-kernel-fields">
+        <label>Kernel (bzImage) <select id="boot-kernel"></select></label>
+        <label>Initial RAM disk <select id="boot-initrd"></select></label>
+        <label>Kernel command line <input id="boot-append" spellcheck="false" autocomplete="off"></label>
+      </div>
+      <div id="boot-disk-fields" class="hidden">
+        <label>Image <select id="boot-image"></select></label>
+        <label>Attach as <select id="boot-drive"><option value="c">hard disk (C:), boot from it</option><option value="a">floppy (A:), boot from it</option></select></label>
+      </div>
+      <div class="boot-machine">
+        <label>CPUs <input id="boot-smp" type="number" min="1" max="255" value="2"></label>
+        <label>Memory (MB) <input id="boot-ram" type="number" min="16" max="3072" step="16" value="256"></label>
+        <label class="check"><input type="checkbox" id="boot-cache"> simulate caches</label>
+      </div>
+      <div class="boot-add">
+        <button type="button" id="boot-add" title="Copy files from your computer into the OS library">Add files…</button>
+        <input type="file" id="boot-file" multiple hidden>
+        <span id="boot-upmsg" class="muted"></span>
+      </div>
+      <p id="boot-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button id="boot-ok" class="primary" value="ok">Boot</button>
       </div>
     </form>
   </dialog>
