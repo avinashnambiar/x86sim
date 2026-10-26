@@ -17,8 +17,9 @@ make test                  # differential test suite (needs Rosetta on Apple Sil
 
 ./x86sim -u --smp 4 --cache   # empty 4-CPU PC: write assembly in the browser, load it on any CPU
 
-./x86sim --kernel bzImage --initrd initrd.cpio          # boot Linux on the serial console
-./x86sim --smp 2 --cache-stats --kernel bzImage ...     # two CPUs, L1/L2 caches, MESI
+os/get-alpine.sh                                        # download Alpine Linux into os/ (once)
+./x86sim --kernel os/bzImage --initrd os/initrd.cpio    # boot it to a shell on the serial console
+./x86sim --smp 2 --cache-stats --kernel os/bzImage ...  # two CPUs, L1/L2 caches, MESI
 ```
 
 ## Running programs

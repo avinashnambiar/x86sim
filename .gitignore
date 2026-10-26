@@ -6,3 +6,6 @@
 *.dSYM/
 .DS_Store
 /tests/linux/cache/
+/os/cache/
+/os/bzImage
+/os/initrd.cpio
