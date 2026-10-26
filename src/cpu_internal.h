@@ -142,6 +142,51 @@ int smm_msr(CPU *c, uint32_t idx, uint64_t *v, int write, int *err);
 static inline int smrr_blocked(const CPU *c, uint64_t pa) {
     return (c->smrr_mask & 0x800) && !c->smm && ((pa ^ c->smrr_base) & c->smrr_mask & 0xFFFFF000ULL) == 0;
 }
+/* vmx.c: VMX operation */
+enum {
+    PIN_EXTINT = 1u << 0, PIN_NMI = 1u << 3, PIN_VNMI = 1u << 5, PIN_PREEMPT = 1u << 6, PIN_POSTED = 1u << 7,
+    PROC_INTWIN = 1u << 2, PROC_TSCOFF = 1u << 3, PROC_HLT = 1u << 7, PROC_INVLPG = 1u << 9, PROC_MWAIT = 1u << 10,
+    PROC_RDPMC = 1u << 11, PROC_RDTSC = 1u << 12, PROC_CR3LOAD = 1u << 15, PROC_CR3STORE = 1u << 16,
+    PROC_CR8LOAD = 1u << 19, PROC_CR8STORE = 1u << 20, PROC_TPR = 1u << 21, PROC_NMIWIN = 1u << 22, PROC_MOVDR = 1u << 23,
+    PROC_UNCONDIO = 1u << 24, PROC_IOBITMAP = 1u << 25, PROC_MTF = 1u << 27, PROC_MSRBITMAP = 1u << 28,
+    PROC_MONITOR = 1u << 29, PROC_PAUSE = 1u << 30, PROC_SEC = 1u << 31,
+    SEC_APIC = 1u << 0, SEC_EPT = 1u << 1, SEC_DESC = 1u << 2, SEC_RDTSCP = 1u << 3, SEC_X2APIC = 1u << 4,
+    SEC_VPID = 1u << 5, SEC_WBINVD = 1u << 6, SEC_UG = 1u << 7, SEC_APICREG = 1u << 8, SEC_VID = 1u << 9,
+    SEC_PLE = 1u << 10, SEC_RDRAND = 1u << 11, SEC_INVPCID = 1u << 12, SEC_VMFUNC = 1u << 13,
+    SEC_SHADOW = 1u << 14, SEC_RDSEED = 1u << 16, SEC_PML = 1u << 17, SEC_TSCSCALE = 1u << 25,
+    EXIT_SAVE_DBG = 1u << 2, EXIT_HOST64 = 1u << 9, EXIT_LOAD_PERF = 1u << 12, EXIT_ACK = 1u << 15,
+    EXIT_SAVE_PAT = 1u << 18, EXIT_LOAD_PAT = 1u << 19, EXIT_SAVE_EFER = 1u << 20, EXIT_LOAD_EFER = 1u << 21, EXIT_SAVE_TIMER = 1u << 22,
+    ENTRY_LOAD_DBG = 1u << 2, ENTRY_IA32E = 1u << 9, ENTRY_LOAD_PERF = 1u << 13, ENTRY_LOAD_PAT = 1u << 14,
+    ENTRY_LOAD_EFER = 1u << 15,
+};
+#define CR4_SUPPORTED (CR4_VME | CR4_PVI | CR4_TSD | CR4_DE | CR4_PSE | CR4_PAE | CR4_MCE | CR4_PGE | CR4_PCE | \
+                       CR4_OSFXSR | CR4_OSXMMEXCPT | CR4_UMIP | CR4_LA57 | CR4_VMXE | CR4_FSGSBASE | CR4_PCIDE | \
+                       CR4_OSXSAVE | CR4_SMEP | CR4_SMAP | CR4_PKE | CR4_CET)
+int vmx_msr(CPU *c, uint32_t idx, uint64_t *v, int write, int *err);
+void exec_vmx(CPU *c, const Insn *in);       /* VMX instructions in root operation */
+void vmx_intercept(CPU *c, const Insn *in);  /* non-root: exits the instruction causes (may not return) */
+_Noreturn void vmx_raise(CPU *c);            /* unwind the instruction and perform the pending exit */
+_Noreturn void vmx_ept_fault(CPU *c, int misconfig, uint64_t qual, uint64_t gpa, uint64_t gla);
+void vmx_exit(CPU *c);                       /* perform the pending VM exit */
+int vmx_boundary(CPU *c, int shadow);        /* exits at an instruction boundary: 1 if one happened */
+void vmx_after_insn(CPU *c);
+int vmx_exc_exits(CPU *c, int vec, int type, int has_err, uint64_t err, uint64_t qual);
+void vmx_delivering(CPU *c, int vec, int kind, int has_err, uint64_t err, uint64_t ret);
+void vmx_task_switch(CPU *c, uint16_t sel, int source);
+uint64_t vmx_cr_write(CPU *c, int n, uint64_t v);
+uint64_t vmx_cr_read(CPU *c, int n);
+uint64_t vmx_cr8_read(CPU *c);               /* CR8 with the TPR shadow */
+void vmx_cr8_write(CPU *c, uint64_t v);
+int vmx_trap(CPU *c);                        /* a pending trap-like exit (TPR threshold, EOI, APIC write) */
+void vmx_apic_access(CPU *c, uint64_t pa, void *buf, int n, int type); /* type 0 read, 1 write, 2 fetch */
+int vmx_x2apic_msr(CPU *c, uint32_t idx, uint64_t *v, int write);     /* 1 virtualized, -1 #GP, 0 not */
+void vmx_pml_log(CPU *c, uint64_t gpa);
+uint64_t vmx_guest_tsc(CPU *c, uint64_t tsc);
+/* Is physical address pa on the APIC-access page of the running guest? */
+static inline int vmx_apic_page(const CPU *c, uint64_t pa) { return ((pa & ~0xFFFULL) | 1) == c->vmx.apic_page; }
+uint64_t mmu_ept_probe(CPU *c, uint64_t gpa); /* guest-physical -> host-physical, ~0 if unmapped */
+/* translated: linear addresses go through mmu_translate (paging, or EPT with paging off) */
+static inline int cpu_translated(const CPU *c) { return (c->cr0 & CR0_PG) || c->vmx.ept; }
 void sys_write_cr(CPU *c, int n, uint64_t v);
 uint64_t sys_read_cr(CPU *c, int n);
 void sys_write_dr(CPU *c, int n, uint64_t v);

@@ -3,6 +3,13 @@
  * a software TLB tagged with PCIDs, access/dirty bit updates and the
  * protection checks (U/S, R/W with CR0.WP, NX, SMEP, SMAP, protection keys).
  *
+ * In VMX non-root operation with EPT, every guest-physical address (the
+ * paging structures and the final page, or the linear address itself
+ * while guest paging is off) is translated again through the extended page
+ * tables; the TLB then holds linear -> host-physical, and only for pages
+ * the EPT maps with full access, so reduced permissions are always
+ * re-checked. EPT violations and misconfigurations are VM exits.
+ *
  * The TLB caches one entry per 4 KiB linear page, also for large pages;
  * entries keep the combined permissions of the walk, and every access
  * re-checks them against the current CPL, CR0, CR4 and RFLAGS.AC. */
@@ -22,7 +29,8 @@
 #define PTE_G 0x100ULL
 #define PTE_NX (1ULL << 63)
 
-enum { TLB_LARGE = 32, TLB_SS = 64 }; /* SS: CET shadow-stack page (R/W=0, D=1, upper levels writable) */
+enum { TLB_LARGE = 32, TLB_SS = 64, TLB_NOCACHE = 128 }; /* SS: CET shadow-stack page (R/W=0, D=1, upper levels writable);
+                                                         * NOCACHE: the walk's result must not be kept */
 
 static uint16_t cur_pcid(CPU *c) { return (c->cr4 & CR4_PCIDE) ? (uint16_t)(c->cr3 & 0xFFF) : 0; }
 
@@ -119,6 +127,73 @@ static void pt_set_bits(CPU *c, uint64_t pa, int size, uint64_t old, uint64_t bi
     raw_write(c, pa & c->a20_mask, &v, size);
 }
 
+/* ---- EPT ---- */
+
+#define EPT_RSVD 0x000FFF8000000000ULL /* address bits above MAXPHYADDR (39) */
+
+/* Guest-physical -> host-physical through the EPT. final: the access is to
+ * the translated linear address (not a guest paging structure). Raises the
+ * VM exit, or with ACC_NOFAULT returns ~0. *perm gets the R/W/X bits. */
+static uint64_t ept(CPU *c, uint64_t gpa, int acc, uint64_t gla, int final, int *perm) {
+    uint64_t table = c->vmx.eptp & ADDR_MASK, hpa = 0;
+    int ad = (c->vmx.eptp & 0x40) != 0, probe = (acc & ACC_NOFAULT) != 0;
+    int need = (acc & ACC_X) ? 4 : (acc & ACC_W) ? 2 : 1, rwx = 7;
+    for (int level = 4;; level--) {
+        int shift = 12 + 9 * (level - 1);
+        uint64_t pa = table + ((gpa >> shift) & 511) * 8, ent = pt_read(c, pa, 8);
+        int p = (int)(ent & 7);
+        if (!p) {
+            rwx = 0;
+            goto violation;
+        }
+        int leaf = level == 1 || (level <= 3 && (ent & 0x80));
+        int mt = (int)(ent >> 3) & 7;
+        if ((p & 3) == 2 || (ent & EPT_RSVD) || (level == 4 && (ent & 0x80)) ||
+            (leaf && (mt == 2 || mt == 3 || mt == 7)) || (leaf && (ent & ((1ULL << shift) - 1) & ADDR_MASK)))
+            goto misconfig;
+        rwx &= p;
+        if (ad && !probe) {
+            int dirty = leaf && (acc & ACC_W) && (rwx & 2);
+            if (dirty && !(ent & 0x200) && (c->vmx.proc2 & SEC_PML)) vmx_pml_log(c, gpa);
+            pt_set_bits(c, pa, 8, ent, dirty ? 0x300 : 0x100);
+        }
+        if (leaf) {
+            hpa = (ent & ADDR_MASK & ~((1ULL << shift) - 1)) | (gpa & ((1ULL << shift) - 1));
+            break;
+        }
+        table = ent & ADDR_MASK;
+    }
+    if (!(rwx & need)) goto violation;
+    *perm = rwx;
+    return hpa;
+violation:
+    if (probe) return ~0ULL;
+    vmx_ept_fault(c, 0, (uint64_t)need | (uint64_t)rwx << 3 | 0x80 | (final ? 0x100 : 0), gpa, gla);
+misconfig:
+    if (probe) return ~0ULL;
+    vmx_ept_fault(c, 1, 0, gpa, gla);
+}
+
+uint64_t mmu_ept_probe(CPU *c, uint64_t gpa) {
+    int perm;
+    return ept(c, gpa, ACC_NOFAULT, 0, 0, &perm);
+}
+
+/* Guest paging-structure accesses: read an entry at a guest-physical
+ * address (0, not present, when an EPT probe fails), set its A/D bits. */
+static uint64_t gpt_read(CPU *c, uint64_t gpa, int size, int acc, uint64_t lin) {
+    int perm;
+    if (c->vmx.ept && (gpa = ept(c, gpa, acc & ACC_NOFAULT, lin, 0, &perm)) == ~0ULL) return 0;
+    return pt_read(c, gpa, size);
+}
+
+static void gpt_set_bits(CPU *c, uint64_t gpa, int size, uint64_t old, uint64_t bits, uint64_t lin) {
+    int perm;
+    if ((old & bits) == bits) return;
+    if (c->vmx.ept) gpa = ept(c, gpa, ACC_W, lin, 0, &perm);
+    pt_set_bits(c, gpa, size, old, bits);
+}
+
 /* ---- TLB maintenance ---- */
 
 void cpu_tlb_flush(CPU *c, int keep_global) {
@@ -199,7 +274,7 @@ static uint32_t walk(CPU *c, uint64_t lin, int acc, TlbEnt *e) {
 
     if (!(c->cr4 & CR4_PAE)) {
         uint64_t pde_pa = (c->cr3 & 0xFFFFF000) + ((lin >> 22) & 0x3FF) * 4;
-        uint64_t pde = pt_read(c, pde_pa, 4);
+        uint64_t pde = gpt_read(c, pde_pa, 4, acc, lin);
         if (!(pde & PTE_P)) return np;
         if (!(pde & PTE_W)) flags &= ~TLB_W;
         if (!(pde & PTE_U)) flags &= ~TLB_U;
@@ -209,9 +284,9 @@ static uint32_t walk(CPU *c, uint64_t lin, int acc, TlbEnt *e) {
             leaf_pa = pde_pa;
             large = 1;
         } else {
-            if (!probe) pt_set_bits(c, pde_pa, 4, pde, PTE_A);
+            if (!probe) gpt_set_bits(c, pde_pa, 4, pde, PTE_A, lin);
             leaf_pa = (pde & 0xFFFFF000) + ((lin >> 12) & 0x3FF) * 4;
-            leaf = pt_read(c, leaf_pa, 4);
+            leaf = gpt_read(c, leaf_pa, 4, acc, lin);
             if (!(leaf & PTE_P)) return np;
             if (!(leaf & PTE_W)) flags &= ~TLB_W;
             if (!(leaf & PTE_U)) flags &= ~TLB_U;
@@ -225,7 +300,7 @@ static uint32_t walk(CPU *c, uint64_t lin, int acc, TlbEnt *e) {
             level = (c->cr4 & CR4_LA57) ? 5 : 4;
             table = c->cr3 & ADDR_MASK;
         } else {
-            uint64_t pdpte = pt_read(c, (c->cr3 & 0xFFFFFFE0) + ((lin >> 30) & 3) * 8, 8);
+            uint64_t pdpte = gpt_read(c, (c->cr3 & 0xFFFFFFE0) + ((lin >> 30) & 3) * 8, 8, acc, lin);
             if (!(pdpte & PTE_P)) return np;
             level = 2;
             table = pdpte & ADDR_MASK;
@@ -233,7 +308,7 @@ static uint32_t walk(CPU *c, uint64_t lin, int acc, TlbEnt *e) {
         for (;; level--) {
             int shift = 12 + 9 * (level - 1);
             uint64_t pa = table + ((lin >> shift) & 511) * 8;
-            uint64_t ent = pt_read(c, pa, 8);
+            uint64_t ent = gpt_read(c, pa, 8, acc, lin);
             if (!(ent & PTE_P)) return np;
             int leaf_level = level == 1 || (level <= 3 && (ent & PTE_PS));
             if (leaf_level && (flags & TLB_W) && !(ent & PTE_W) && (ent & PTE_D)) flags |= TLB_SS;
@@ -250,7 +325,7 @@ static uint32_t walk(CPU *c, uint64_t lin, int acc, TlbEnt *e) {
                 break;
             }
             if (ent & PTE_PS) return np | 1 | 8; /* PS in a PML4/PML5 entry is reserved */
-            if (!probe) pt_set_bits(c, pa, 8, ent, PTE_A);
+            if (!probe) gpt_set_bits(c, pa, 8, ent, PTE_A, lin);
             table = ent & ADDR_MASK;
         }
         leaf_size = 8;
@@ -261,8 +336,14 @@ static uint32_t walk(CPU *c, uint64_t lin, int acc, TlbEnt *e) {
     uint32_t ec = check_perm(c, flags, pkey, acc);
     if (ec) return WALK_FAIL | ec;
     if (!probe) {
-        pt_set_bits(c, leaf_pa, leaf_size, leaf, PTE_A | (w ? PTE_D : 0));
-        if (w || (leaf & PTE_D)) flags |= TLB_D;
+        gpt_set_bits(c, leaf_pa, leaf_size, leaf, PTE_A | (w ? PTE_D : 0), lin);
+        if (w || ((leaf & PTE_D) && !c->vmx.ept)) flags |= TLB_D; /* EPT: the first write re-walks to set EPT dirty */
+    }
+    if (c->vmx.ept) {
+        int perm;
+        page = ept(c, page, acc, lin, 1, &perm);
+        if (page == ~0ULL) return WALK_FAIL;
+        if (perm != 7) flags |= TLB_NOCACHE;
     }
     e->phys = page;
     e->flags = (uint8_t)flags;
@@ -272,7 +353,7 @@ static uint32_t walk(CPU *c, uint64_t lin, int acc, TlbEnt *e) {
 
 _Noreturn static void raise_pf(CPU *c, uint64_t lin, uint32_t ec) {
     char msg[96];
-    c->cr2 = lin;
+    if (!c->vmx.guest) c->cr2 = lin; /* in a guest, at delivery (an exit leaves CR2 alone) */
     c->exc_addr = lin;
     snprintf(msg, sizeof msg, "#PF page fault %s 0x%llx", (ec & 16) ? "fetching" : (ec & 2) ? "writing" : "reading",
              (unsigned long long)lin);
@@ -280,8 +361,25 @@ _Noreturn static void raise_pf(CPU *c, uint64_t lin, uint32_t ec) {
 }
 
 /* Translate; raises #PF unless ACC_NOFAULT (then returns ~0 on failure). */
+/* Guest paging off under EPT: the linear address is guest-physical. */
+static uint64_t translate_flat(CPU *c, uint64_t lin, int acc) {
+    TlbEnt *e = &c->tlb[(lin >> 12) & (TLB_SIZE - 1)];
+    uint64_t tag = (lin >> 12) + 1;
+    if (e->tag == tag && (!(acc & ACC_W) || (e->flags & TLB_D))) return e->phys | (lin & 0xFFF);
+    int perm;
+    uint64_t pa = ept(c, lin, acc, lin, 1, &perm);
+    if (pa == ~0ULL) return pa;
+    if (perm == 7 && !(acc & ACC_NOFAULT)) {
+        e->tag = tag;
+        e->phys = pa & ~0xFFFULL;
+        e->pcid = 0;
+        e->flags = TLB_W | TLB_U | ((acc & ACC_W) ? TLB_D : 0);
+    }
+    return pa;
+}
+
 uint64_t mmu_translate(CPU *c, uint64_t lin, int acc) {
-    if (!(c->cr0 & CR0_PG)) return lin & 0xFFFFFFFFULL;
+    if (!(c->cr0 & CR0_PG)) return c->vmx.ept ? translate_flat(c, lin & 0xFFFFFFFFULL, acc) : lin & 0xFFFFFFFFULL;
     TlbEnt *e = &c->tlb[(lin >> 12) & (TLB_SIZE - 1)];
     uint64_t tag = (lin >> 12) + 1;
     uint16_t pcid = cur_pcid(c);
@@ -295,7 +393,10 @@ uint64_t mmu_translate(CPU *c, uint64_t lin, int acc) {
         if (e->tag == tag) e->tag = 0;
         raise_pf(c, lin, ec & ~WALK_FAIL);
     }
-    if (acc & ACC_NOFAULT) return ne.phys | (lin & 0xFFF);
+    if ((acc & ACC_NOFAULT) || (ne.flags & TLB_NOCACHE)) {
+        if (e->tag == tag) e->tag = 0;
+        return ne.phys | (lin & 0xFFF);
+    }
     ne.tag = tag;
     ne.pcid = pcid;
     *e = ne;
@@ -318,31 +419,43 @@ int cpu_virt_to_phys(CPU *c, uint64_t lin, uint64_t *phys) {
 
 /* ---- linear accesses; page-crossing accesses check both pages first ---- */
 
+/* Data accesses at translated addresses: the APIC-access page of a guest
+ * is virtualized (vmx.c). */
+static void data_read(CPU *c, uint64_t pa, void *buf, int n) {
+    if (vmx_apic_page(c, pa)) vmx_apic_access(c, pa, buf, n, 0);
+    else phys_read(c, pa, buf, n);
+}
+
+static void data_write(CPU *c, uint64_t pa, const void *buf, int n) {
+    if (vmx_apic_page(c, pa)) vmx_apic_access(c, pa, (void *)buf, n, 1);
+    else phys_write(c, pa, buf, n);
+}
+
 void mmu_read(CPU *c, uint64_t lin, void *buf, int n, int acc) {
     uint64_t off = lin & 0xFFF;
     if (off + (uint64_t)n <= 4096) {
-        phys_read(c, mmu_translate(c, lin, acc), buf, n);
+        data_read(c, mmu_translate(c, lin, acc), buf, n);
         return;
     }
     int n1 = (int)(4096 - off);
     uint64_t lin2 = (lin + (uint64_t)n1) & (c->bits == 64 ? ~0ULL : 0xFFFFFFFFULL);
     uint64_t p1 = mmu_translate(c, lin, acc), p2 = mmu_translate(c, lin2, acc);
-    phys_read(c, p1, buf, n1);
-    phys_read(c, p2, (uint8_t *)buf + n1, n - n1);
+    data_read(c, p1, buf, n1);
+    data_read(c, p2, (uint8_t *)buf + n1, n - n1);
 }
 
 void mmu_write(CPU *c, uint64_t lin, const void *buf, int n, int acc) {
     acc |= ACC_W;
     uint64_t off = lin & 0xFFF;
     if (off + (uint64_t)n <= 4096) {
-        phys_write(c, mmu_translate(c, lin, acc), buf, n);
+        data_write(c, mmu_translate(c, lin, acc), buf, n);
         return;
     }
     int n1 = (int)(4096 - off);
     uint64_t lin2 = (lin + (uint64_t)n1) & (c->bits == 64 ? ~0ULL : 0xFFFFFFFFULL);
     uint64_t p1 = mmu_translate(c, lin, acc), p2 = mmu_translate(c, lin2, acc);
-    phys_write(c, p1, buf, n1);
-    phys_write(c, p2, (const uint8_t *)buf + n1, n - n1);
+    data_write(c, p1, buf, n1);
+    data_write(c, p2, (const uint8_t *)buf + n1, n - n1);
 }
 
 /* Instruction fetch: faults only for the first byte; the following page
@@ -350,7 +463,9 @@ void mmu_write(CPU *c, uint64_t lin, const void *buf, int n, int acc) {
 size_t mmu_fetch(CPU *c, uint64_t lin, uint8_t *buf, size_t n) {
     uint64_t off = lin & 0xFFF;
     size_t n1 = 4096 - off < n ? 4096 - off : n;
-    phys_fetch(c, mmu_translate(c, lin, ACC_X), buf, (int)n1);
+    uint64_t p1 = mmu_translate(c, lin, ACC_X);
+    if (vmx_apic_page(c, p1)) vmx_apic_access(c, p1, buf, (int)n1, 2);
+    phys_fetch(c, p1, buf, (int)n1);
     if (n1 == n) return n;
     uint64_t lin2 = (lin + n1) & (c->bits == 64 ? ~0ULL : 0xFFFFFFFFULL);
     uint64_t p2 = mmu_translate(c, lin2, ACC_X | ACC_NOFAULT);

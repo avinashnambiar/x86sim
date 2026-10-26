@@ -157,6 +157,40 @@ typedef struct {
     uint64_t lbr[3][32], lbr_tos, lbr_select; /* last-branch-record MSRs: storage only, nothing records */
 } Pmu;
 
+/* VMX operation (vmx.c). The VMCS lives in guest memory at its physical
+ * address (implementation-specific layout); the controls of the running
+ * guest are cached here while in VMX non-root operation. */
+typedef struct {
+    int on;                /* in VMX operation (after VMXON) */
+    int guest;             /* VMX non-root operation */
+    int ept;               /* non-root with EPT: guest-physical addresses are translated */
+    int init_pending;      /* INIT latched (blocked in root operation; a VM exit in non-root) */
+    uint64_t vmxon, vmcs;  /* VMXON region, current-VMCS pointer (~0 = none) */
+    uint32_t pin, proc, proc2, exit_ctl, entry_ctl, exc_bitmap, pf_mask, pf_match, cr3_count;
+    uint64_t cr0_mask, cr4_mask, cr0_shadow, cr4_shadow, cr3_target[4];
+    uint64_t io_a, io_b, msr_bitmap, tsc_offset, eptp;
+    int host_nmi_blocked;  /* real NMI blocking while the guest has virtual-NMI blocking */
+    int in_delivery;       /* delivering the event in vec_info (an exit now records IDT vectoring) */
+    uint32_t vec_info, vec_err, vec_len;
+    /* APIC virtualization: virtual-APIC page, APIC-access page (its address
+     * | 1 while a guest runs with it, else 0), posted-interrupt descriptor and
+     * vector, RVI/SVI, TPR threshold, EOI-exit bitmap */
+    uint64_t vapic, apic_page, pi_desc, eoi_exit[4];
+    uint32_t tpr_threshold, pi_vector, rvi, svi;
+    uint32_t trap_reason;  /* pending trap-like exit after the instruction (0 = none) */
+    uint64_t trap_qual;
+    uint64_t timer_deadline; /* VMX-preemption timer: expiry in TSC ticks (without IA32_TSC offset) */
+    uint64_t ple_first, ple_last; /* pause-loop exiting: first and latest PAUSE of the loop */
+    uint32_t ple_gap, ple_window;
+    uint64_t pml_addr, link, vmread_bm, vmwrite_bm, vmfunc, eptp_list, tsc_mult;
+    uint32_t pml_index;
+    int insn_len;          /* length of the instruction being executed (exit instruction length) */
+    /* the pending VM exit (raised mid-instruction, performed by the step loop) */
+    uint32_t x_reason, x_intinfo, x_interr, x_len, x_info;
+    uint64_t x_qual, x_gpa, x_gla;
+    uint64_t exits, entries; /* statistics */
+} Vmx;
+
 typedef struct CPU CPU;
 struct CPU {
     uint64_t r[16];
@@ -222,8 +256,12 @@ struct CPU {
     int tx_jump;           /* the longjmp out of this instruction is a transaction abort */
     int smm, smi_pending;  /* in system management mode; an SMI is waiting (smm.c) */
     uint64_t smbase, smrr_base, smrr_mask, smi_count;
+    Vmx vmx;
+    int vmx_jump;          /* the longjmp out of this instruction is a VM exit */
+    void (*on_init)(CPU *c); /* process an INIT latched during VMX operation (machine) */
     void (*pmi_hook)(CPU *c); /* a counter with its interrupt enabled overflowed */
     void (*tpr_hook)(CPU *c, int tpr);
+    void (*eoi_hook)(CPU *c); /* EOI to the local APIC (posted-interrupt processing) */
     uint32_t cpuid_1c, cpuid_1d; /* extra CPUID.1 feature bits from the machine (APIC etc.) */
     TlbEnt tlb[TLB_SIZE];
 

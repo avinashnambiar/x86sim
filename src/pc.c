@@ -68,11 +68,15 @@ int pc_idle(Machine *m) {
     int wakeable = 0;
     for (int i = 0; i < m->ncpu; i++) {
         CPU *c = m->cpus[i];
-        if (!c->wait_sipi && ((c->rflags & FL_IF) || c->nmi_pending || c->smi_pending)) wakeable = 1;
+        if (!c->wait_sipi && ((c->rflags & FL_IF) || c->nmi_pending || c->smi_pending || c->vmx.guest)) wakeable = 1;
     }
     if (!wakeable) return 0;
     uint64_t now = pc_now(pc), target = pc->next_event;
     int slept = 0;
+    for (int i = 0; i < m->ncpu; i++) { /* a guest's VMX-preemption timer */
+        CPU *c = m->cpus[i];
+        if (c->vmx.guest && (c->vmx.pin & PIN_PREEMPT)) target = min64(target, c->vmx.timer_deadline);
+    }
     if (target == NS_NEVER) return 0;
     if (pc->realtime) {
         uint64_t real = mono_ns() - pc->real_start;
@@ -1548,6 +1552,7 @@ int pc_load_image(Machine *m, char *err, size_t errn); /* loader.c */
 void pc_rebind(Machine *m) { m->pc->m = m; }
 
 static void pmi(CPU *c) { lapic_pmi(((Machine *)c->user)->pc, c->index); }
+static void cpu_init_now(CPU *c) { pc_cpu_init(((Machine *)c->user)->pc, c->index); }
 
 /* Cache events count on the requesting core's performance counters. */
 static void cache_event(void *ctx, int core, int ev) {
@@ -1568,11 +1573,13 @@ static void setup_cpu(Machine *m, CPU *c, int i) {
     c->on_port_out = port_out;
     c->read_tsc = tsc_read;
     c->get_interrupt = get_interrupt;
+    c->eoi_hook = apic_eoi;
     c->msr_hook = apic_msr;
     c->pmi_hook = pmi;
     c->tx_live = &m->tx_live;
     c->peers = m->cpus;
     c->tpr_hook = apic_tpr;
+    c->on_init = cpu_init_now;
     c->on_mmio = apic_mmio;
     c->mmio_lo = IOAPIC_BASE;
     c->mmio_hi = LAPIC_BASE + 0x1000;
@@ -1590,6 +1597,10 @@ void pc_cpu_init(PC *pc, int i) {
     uint64_t apic_base = c->msr.apic_base ? c->msr.apic_base : LAPIC_BASE | 0x800;
     uint64_t a20 = m->cpu.a20_mask ? m->cpu.a20_mask : ~0ULL;
     uint64_t smbase = c->smbase, smrr_base = c->smrr_base, smrr_mask = c->smrr_mask;
+    if (c->vmx.on) { /* VMX operation: blocked in root operation, a VM exit in a guest */
+        c->vmx.init_pending = 1;
+        return;
+    }
     c->icache = m->cpu.icache; /* the decoded-instruction cache is shared (keyed by physical address) */
     cpu_reset_system(c);
     setup_cpu(m, c, i);

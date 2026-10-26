@@ -199,12 +199,13 @@ src/fpu.c, softfloat.[ch]  x87 (80-bit, correctly rounded), FXSAVE/XSAVE
 src/system.c      segmentation, privilege levels, gates, task switches, VM86,
                   interrupt/exception delivery, SYSCALL/SYSENTER, MSRs, CRs/DRs
 src/mmu.c         paging (32-bit, PAE, 4/5-level), PCID TLB, SMEP/SMAP/PKU,
-                  CET shadow-stack pages
+                  CET shadow-stack pages, EPT
 src/cet.c         CET shadow stacks and indirect branch tracking
 src/cache.[ch]    L1/L2 cache hierarchy with MESI coherence
 src/pmu.c         performance counters (architectural perfmon v4), RDPMC, PMIs
 src/tsx.c         restricted transactional memory (XBEGIN/XEND/XABORT/XTEST)
 src/smm.c         system management mode: SMI entry, SMRAM save state, RSM, SMRR
+src/vmx.c         VMX: VMCS, VM entry checks and state loading, VM exits, controls
 src/pc.c          PC machine: clock, 8259 PIC, 8254 PIT, CMOS/RTC, 8042, 16550,
                   VGA, PCI, IDE; SMP bring-up
 src/apic.c        local APICs (xAPIC and x2APIC: timer, IPIs) and the I/O APIC
@@ -247,7 +248,14 @@ edge-case values and compares every architecturally defined flag.
   relocation, SMRR protection, an SMI IPI to a halted CPU (`smm`), and
   x2APIC with VT-d interrupt remapping: MSR interface, 32-bit physical,
   cluster and broadcast IPIs, queued invalidation, remapped and blocked
-  I/O APIC interrupts (`x2apic`).
+  I/O APIC interrupts (`x2apic`), and VMX: VMXON preconditions,
+  VM-instruction errors, a 64-bit guest exiting on CPUID, I/O, MSR and CR
+  accesses, exceptions and interrupt windows, and an unrestricted real-mode
+  guest under EPT switching to paged protected mode, with EPT
+  violations (`vmx`); and APIC virtualization (TPR shadow, APIC-access
+  page, virtual-interrupt delivery, posted interrupts, x2APIC mode), the
+  preemption timer, pause-loop exiting, TSC scaling, page-modification
+  logging, EPTP switching and VMCS shadowing (`vmxapic`).
 - `tests/asm/run.sh` — the assembly editor's API: every example in each
   mode, multi-CPU loads, reset replay, diagnostics and refused addresses
   (including overlapping programs).
@@ -256,7 +264,13 @@ edge-case values and compares every architecturally defined flag.
 - `tests/linux/run.sh` — boots Alpine's Linux 6.6 kernel (downloaded once) on
   one CPU, on two CPUs, and on two and eight CPUs with the caches; types a line into
   `/init` and checks the echo, the clean reboot, and that Linux switched to
-  x2APIC mode through interrupt remapping.
+  x2APIC mode through interrupt remapping. Then it boots Alpine's linux-virt
+  kernel on one CPU and on two CPUs with the caches, and its `/init`
+  (`tests/linux/kvm.S`) loads `kvm-intel.ko`, checks that KVM enabled
+  APICv, PML, the preemption timer, pause-loop exiting and shadow VMCSs,
+  and runs a KVM guest with an in-kernel irqchip: it prints over port I/O,
+  takes a local APIC timer interrupt and a self IPI, triggers an MMIO exit,
+  and its writes show up in KVM's dirty-page log.
 
 ## Status
 
@@ -289,10 +303,26 @@ Implemented:
   with extended (x2APIC) destinations, queued invalidation, compatibility-
   format blocking. Linux boots in x2APIC mode through it. DMA translation is
   accepted but not applied (no device does bus-master DMA)
+- VMX (PC mode), enough for real KVM with every feature it uses: VMXON/
+  VMXOFF, VMCS instructions, VMLAUNCH/VMRESUME with the SDM's control,
+  host-state and guest-state checks, MSR load/store lists, event
+  injection, IDT-vectoring info; pin, primary and secondary controls
+  including virtual NMIs, interrupt/NMI windows, MTF, CR masks and shadows,
+  I/O and MSR bitmaps, TSC offsetting and scaling, RDTSCP, INVPCID,
+  descriptor-table and WBINVD exiting, unrestricted guests, VPID, EPT
+  (4-level, 2M/1G pages, accessed/dirty bits, execute-only, violations and
+  misconfigurations) with INVEPT/INVVPID, the VMX-preemption timer,
+  pause-loop exiting, page-modification logging, VMCS shadowing, VM
+  functions (EPTP switching), and APIC virtualization: TPR shadow,
+  APIC-access page, APIC-register virtualization, x2APIC mode,
+  virtual-interrupt delivery and posted interrupts. Linux's kvm-intel loads
+  with APICv, PML, the preemption timer and shadow VMCSs enabled and runs
+  guests. Not modeled: SMM dual-monitor treatment, EPT-violation #VE,
+  sub-page permissions, mode-based execute control and IPI virtualization
 - A PC that boots disks, floppies and Linux, with SMP (up to 255 CPUs) and a
   MESI cache hierarchy
 - Linux user mode (≈45 syscalls), DOS int 21h and BIOS services
 
-Not yet: AVX/AVX2/FMA and AVX-512, BMI1/2, VMX. Anything not implemented
+Not yet: AVX/AVX2/FMA and AVX-512, BMI1/2, SGX. Anything not implemented
 stops with a clear `instruction not implemented yet: ...` message rather than
 misbehaving.

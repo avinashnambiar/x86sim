@@ -303,6 +303,8 @@ void apic_tpr(CPU *c, int tpr) {
     pc_update_irq(pc);
 }
 
+void apic_eoi(CPU *c) { lapic_eoi(((Machine *)c->user)->pc, c->index); }
+
 /* x2APIC registers as MSRs 0x800 + offset / 16; -1 = #GP. */
 static int x2apic_reg(uint32_t off) {
     if (off >= 0x100 && off < 0x280) return 1; /* ISR, TMR, IRR */

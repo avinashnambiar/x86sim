@@ -41,6 +41,8 @@
     X(SAVEPREVSSP, "saveprevssp") X(SETSSBSY, "setssbsy") X(CLRSSBSY, "clrssbsy") X(WRSS, "wrss") X(WRUSS, "wruss") \
     X(ADCX, "adcx") X(ADOX, "adox") \
     X(XBEGIN, "xbegin") X(XABORT, "xabort") \
+    X(VMXON, "vmxon") X(VMCLEAR, "vmclear") X(VMPTRLD, "vmptrld") X(VMPTRST, "vmptrst") X(VMREAD, "vmread") \
+    X(VMWRITE, "vmwrite") X(INVEPT, "invept") X(INVVPID, "invvpid") \
     X(GRP7R, "(grp7)") X(SGDT, "sgdt") X(SIDT, "sidt") X(LGDT, "lgdt") X(LIDT, "lidt") \
     X(SMSW, "smsw") X(LMSW, "lmsw") X(INVLPG, "invlpg") \
     X(PREFETCH, "prefetch") X(FXSAVE, "fxsave") X(FXRSTOR, "fxrstor") X(LDMXCSR, "ldmxcsr") X(STMXCSR, "stmxcsr") \

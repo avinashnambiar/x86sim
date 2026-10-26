@@ -207,6 +207,7 @@ void iommu_ioapic(PC *pc, uint64_t rte, int level);
 void iommu_reset(PC *pc);
 int apic_msr(CPU *c, uint32_t msr, uint64_t *val, int write);
 void apic_tpr(CPU *c, int tpr);
+void apic_eoi(CPU *c);
 void ioapic_set_irq(PC *pc, int pin, int level);
 
 /* bios.c */

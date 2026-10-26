@@ -93,7 +93,8 @@ function renderHeader(st) {
   $('program').title = st.program.join('\n');
   if (st.sys) {
     const names = { real: 'real mode', vm86: 'virtual-8086', protected: '32-bit protected', compat: 'compatibility mode', long: '64-bit long mode' };
-    $('mode').textContent = `PC · ${names[st.sys.mode] || st.sys.mode} · CPL ${st.sys.cpl}${st.sys.paging ? ' · paging' : ''}`;
+    const vmx = st.sys.vmx === 'guest' ? ' · VMX guest' : st.sys.vmx === 'root' ? ' · VMX root' : '';
+    $('mode').textContent = `PC · ${names[st.sys.mode] || st.sys.mode} · CPL ${st.sys.cpl}${st.sys.paging ? ' · paging' : ''}${vmx}`;
   } else {
     $('mode').textContent = `${st.bits === 16 ? '16-bit real mode' : st.bits + '-bit'} · ${st.os}`;
   }

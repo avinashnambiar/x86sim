@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Build a tiny initramfs for x86sim's Linux boot test.
 
-usage: mkinitramfs.py init.o out.cpio
+usage: mkinitramfs.py init.o out.cpio [file ...]
 
 init.o is an x86-64 ELF object whose .text is position independent and has
 no relocations (see init.S). Its .text becomes a static ELF executable
-/init; the archive also holds /dev/console and an empty /proc."""
+/init; the archive also holds /dev/console, an empty /proc and any extra
+files, at the top level under their base names."""
+import os
 import struct
 import sys
 
@@ -61,6 +63,8 @@ def main():
         ("proc", 0o040755, b"", (0, 0)),
         ("init", 0o100755, elf_exec(code), (0, 0)),
     ]
+    for f in sys.argv[3:]:
+        entries.append((os.path.basename(f), 0o100644, open(f, "rb").read(), (0, 0)))
     open(sys.argv[2], "wb").write(cpio(entries))
 
 

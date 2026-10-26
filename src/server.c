@@ -118,6 +118,8 @@ static void api_state(Machine *m, Buf *b) {
                          : c->bits == 64 ? "long" : (c->efer & EFER_LMA) ? "compat" : "protected";
         buf_printf(b, ",\"sys\":{\"mode\":\"%s\",\"cpl\":%d,\"paging\":%s,\"time_ns\":%llu", mode, c->cpl,
                    (c->cr0 & CR0_PG) ? "true" : "false", (unsigned long long)pc_time_ns(m));
+        buf_printf(b, ",\"vmx\":\"%s\",\"vm_exits\":%llu", c->vmx.guest ? "guest" : c->vmx.on ? "root" : "off",
+                   (unsigned long long)c->vmx.exits);
         const char *cn[] = {"cr0", "cr2", "cr3", "cr4", "efer"};
         uint64_t cv[] = {c->cr0, c->cr2, c->cr3, c->cr4, c->efer};
         for (int i = 0; i < 5; i++) {

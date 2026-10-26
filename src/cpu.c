@@ -99,7 +99,7 @@ uint64_t linear(CPU *c, int seg, uint64_t off) {
 void lin_read(CPU *c, uint64_t a, void *buf, int n, int acc) {
     if (!c->sys) {
         if (mem_read(c->mem, a, buf, (size_t)n)) page_fault(c, mem_fault_addr(c->mem), 0, 0);
-    } else if (c->cr0 & CR0_PG) {
+    } else if (cpu_translated(c)) {
         mmu_read(c, a, buf, n, acc);
     } else {
         phys_read(c, a, buf, n);
@@ -109,7 +109,7 @@ void lin_read(CPU *c, uint64_t a, void *buf, int n, int acc) {
 void lin_write(CPU *c, uint64_t a, const void *buf, int n, int acc) {
     if (!c->sys) {
         if (mem_write(c->mem, a, buf, (size_t)n)) page_fault(c, mem_fault_addr(c->mem), 1, 0);
-    } else if (c->cr0 & CR0_PG) {
+    } else if (cpu_translated(c)) {
         mmu_write(c, a, buf, n, acc);
     } else {
         phys_write(c, a, buf, n);
@@ -511,6 +511,7 @@ static void cpuid(CPU *c) {
           | id << 24;              /* initial APIC ID */
         cc = (1u << 0)             /* SSE3 */
            | (1u << 1)             /* PCLMULQDQ */
+           | (c->sys ? 1u << 5 : 0) /* VMX (system mode) */
            | (1u << 9)             /* SSSE3 */
            | (1u << 13)            /* CMPXCHG16B */
            | (1u << 17)            /* PCID */
@@ -1202,7 +1203,7 @@ static void execute(CPU *c, const Insn *in) {
     case I_CLFLUSH: /* CLFLUSH / CLFLUSHOPT: write the line back and drop it from every cache */
         if (c->cache) {
             uint64_t lin = ea_linear(c, in);
-            uint64_t pa = (c->cr0 & CR0_PG) ? mmu_translate(c, lin, 0) : lin;
+            uint64_t pa = cpu_translated(c) ? mmu_translate(c, lin, 0) : lin;
             cache_flush_line(c->cache, pa & c->a20_mask, 1);
         }
         break;
@@ -1339,6 +1340,7 @@ static void execute(CPU *c, const Insn *in) {
             break;
         }
         if (in->modrm == 0xD5 || in->modrm == 0xD6) raise_exc(c, EXC_UD, 0, "#UD no RTM in user-mode emulation");
+        if ((in->modrm >= 0xC1 && in->modrm <= 0xC4) || in->modrm == 0xD4) raise_exc(c, EXC_UD, 0, "#UD no VMX in user-mode emulation");
         if (c->cpl > 0) raise_exc(c, EXC_GP, 0, "#GP privileged instruction");
         unimplemented(c, in);
     case I_XBEGIN:
@@ -1352,6 +1354,11 @@ static void execute(CPU *c, const Insn *in) {
     case I_CLTS: case I_SYSRET: case I_SYSEXIT: case I_INVD: case I_WBINVD: case I_MOVCR: case I_MOVDR:
     case I_WRMSR: case I_RDMSR: case I_RDPMC: case I_RSM: case I_UD0: case I_UD1: case I_INVPCID:
     case I_RDFSBASE: case I_RDGSBASE: case I_WRFSBASE: case I_WRGSBASE:
+        exec_system(c, in);
+        break;
+    case I_VMXON: case I_VMCLEAR: case I_VMPTRLD: case I_VMPTRST: case I_VMREAD: case I_VMWRITE:
+    case I_INVEPT: case I_INVVPID:
+        if (!c->sys) raise_exc(c, EXC_UD, 0, "#UD no VMX in user-mode emulation");
         exec_system(c, in);
         break;
 

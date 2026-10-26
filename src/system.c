@@ -318,6 +318,7 @@ static void set_busy(CPU *c, uint16_t sel, int busy) {
 
 static void task_switch(CPU *c, uint16_t nsel, uint32_t nlo, uint32_t nhi, int reason, int has_err, uint32_t err,
                         uint64_t ret_rip) {
+    if (c->vmx.guest) vmx_task_switch(c, nsel, reason == TS_CALL ? 0 : reason == TS_IRET ? 1 : reason == TS_JMP ? 2 : 3);
     uint64_t nb = desc_base(nlo, nhi);
     uint32_t nl = desc_limit(nlo, nhi);
     int ntype = (nhi >> 8) & 15, n32 = (ntype & 8) != 0;
@@ -696,7 +697,7 @@ static void deliver_real(CPU *c, int vec, uint64_t ret) {
     c->rip = c->next_rip = ent & 0xFFFF;
 }
 
-void sys_deliver(CPU *c, int vec, int kind, int has_err, uint64_t err, uint64_t ret) {
+static void deliver_event(CPU *c, int vec, int kind, int has_err, uint64_t err, uint64_t ret) {
     int ext = (kind == EV_EXT || kind == EV_EXC) ? 1 : 0;
     if (!pmode(c)) {
         deliver_real(c, vec, ret);
@@ -805,8 +806,17 @@ void sys_deliver(CPU *c, int vec, int kind, int has_err, uint64_t err, uint64_t 
     c->snap_valid = 0;
 }
 
+/* Deliver an event; in VMX non-root operation a VM exit midway records it
+ * as IDT-vectoring information. */
+void sys_deliver(CPU *c, int vec, int kind, int has_err, uint64_t err, uint64_t ret) {
+    if (c->vmx.guest) vmx_delivering(c, vec, kind, has_err, err, ret);
+    deliver_event(c, vec, kind, has_err, err, ret);
+    c->vmx.in_delivery = 0;
+}
+
 /* INT n / INT3 / INTO / INT1 executed by the program (sys mode). */
 void sys_soft_int(CPU *c, int vec, int kind) {
+    if (c->vmx.guest && kind != EV_SOFT && vmx_exc_exits(c, vec, kind == EV_ICEBP ? 5 : 6, 0, 0, 0)) vmx_raise(c);
     sys_deliver(c, vec, kind, 0, 0, c->next_rip);
 }
 
@@ -903,7 +913,10 @@ void sys_sysexit(CPU *c, int rexw) {
 
 /* ---- MSRs ---- */
 
-static uint64_t read_tsc(CPU *c) { return (c->read_tsc ? c->read_tsc(c) : c->icount) + c->tsc_offset; }
+static uint64_t read_tsc(CPU *c) {
+    uint64_t t = (c->read_tsc ? c->read_tsc(c) : c->icount) + c->tsc_offset;
+    return c->vmx.guest ? vmx_guest_tsc(c, t) : t;
+}
 
 uint64_t sys_rdtsc(CPU *c) {
     if (c->sys && (c->cr4 & CR4_TSD) && c->cpl > 0 && pmode(c)) fault(c, EXC_GP, 0);
@@ -923,12 +936,13 @@ static int uncore_msr(uint32_t idx) {
 
 int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v) {
     int err, h;
+    if (c->vmx.guest && (c->vmx.proc2 & SEC_X2APIC) && (idx >> 8) == 8 && (h = vmx_x2apic_msr(c, idx, v, 0)))
+        return h < 0 ? -1 : 0;
     if (c->msr_hook && (h = c->msr_hook(c, idx, v, 0))) return h < 0 ? -1 : 0;
-    if (pmu_msr(c, idx, v, 0, &err) || smm_msr(c, idx, v, 0, &err)) return err ? -1 : 0;
+    if (pmu_msr(c, idx, v, 0, &err) || smm_msr(c, idx, v, 0, &err) || vmx_msr(c, idx, v, 0, &err)) return err ? -1 : 0;
     switch (idx) {
     case 0x10: *v = read_tsc(c); return 0;
     case 0x1B: *v = c->msr.apic_base; return 0;
-    case 0x3A: *v = c->msr.feature_control; return 0;
     case 0x3B: *v = c->msr.tsc_adjust; return 0;
     case 0x48: *v = c->msr.spec_ctrl; return 0;
     case 0x17: *v = 0; return 0; /* platform ID */
@@ -971,12 +985,13 @@ int sys_rdmsr(CPU *c, uint32_t idx, uint64_t *v) {
 
 int sys_wrmsr(CPU *c, uint32_t idx, uint64_t v) {
     int err, h;
+    if (c->vmx.guest && (c->vmx.proc2 & SEC_X2APIC) && (idx >> 8) == 8 && (h = vmx_x2apic_msr(c, idx, &v, 1)))
+        return h < 0 ? -1 : 0;
     if (c->msr_hook && (h = c->msr_hook(c, idx, &v, 1))) return h < 0 ? -1 : 0;
-    if (pmu_msr(c, idx, &v, 1, &err) || smm_msr(c, idx, &v, 1, &err)) return err ? -1 : 0;
+    if (pmu_msr(c, idx, &v, 1, &err) || smm_msr(c, idx, &v, 1, &err) || vmx_msr(c, idx, &v, 1, &err)) return err ? -1 : 0;
     switch (idx) {
     case 0x10: c->tsc_offset = v - (c->read_tsc ? c->read_tsc(c) : c->icount); return 0;
     case 0x1B: c->msr.apic_base = v; return 0;
-    case 0x3A: c->msr.feature_control = v; return 0;
     case 0x3B: c->tsc_offset += v - c->msr.tsc_adjust; c->msr.tsc_adjust = v; return 0;
     case 0x48: c->msr.spec_ctrl = v; return 0;
     case 0x49: return 0; /* PRED_CMD */
@@ -1027,6 +1042,11 @@ void sys_write_cr(CPU *c, int n, uint64_t v) {
     case 0: {
         if (c->bits != 64) v &= 0xFFFFFFFF;
         if (v >> 32) fault(c, EXC_GP, 0);
+        if (c->vmx.guest) v = vmx_cr_write(c, 0, v);
+        if (c->vmx.on) { /* fixed bits in VMX operation; an unrestricted guest may clear PE and PG */
+            uint64_t f0 = c->vmx.guest && (c->vmx.proc2 & SEC_UG) ? CR0_NE : CR0_PE | CR0_NE | CR0_PG;
+            if ((v & f0) != f0) fault(c, EXC_GP, 0);
+        }
         if ((v & CR0_PG) && !(v & CR0_PE)) fault(c, EXC_GP, 0);
         if ((v & CR0_NW) && !(v & CR0_CD)) fault(c, EXC_GP, 0);
         if (!(v & CR0_WP) && (c->cr4 & CR4_CET)) fault(c, EXC_GP, 0);
@@ -1058,10 +1078,9 @@ void sys_write_cr(CPU *c, int n, uint64_t v) {
         }
         return;
     case 4: {
-        uint64_t supported = CR4_VME | CR4_PVI | CR4_TSD | CR4_DE | CR4_PSE | CR4_PAE | CR4_MCE | CR4_PGE |
-                             CR4_PCE | CR4_OSFXSR | CR4_OSXMMEXCPT | CR4_UMIP | CR4_LA57 | CR4_FSGSBASE |
-                             CR4_PCIDE | CR4_OSXSAVE | CR4_SMEP | CR4_SMAP | CR4_PKE | CR4_CET;
-        if (v & ~supported) fault(c, EXC_GP, 0);
+        if (c->vmx.guest) v = vmx_cr_write(c, 4, v);
+        if (v & ~CR4_SUPPORTED) fault(c, EXC_GP, 0);
+        if (c->vmx.on && !(v & CR4_VMXE)) fault(c, EXC_GP, 0);
         uint64_t old = c->cr4;
         if (long_mode(c) && !(v & CR4_PAE)) fault(c, EXC_GP, 0);
         if (long_mode(c) && ((v ^ old) & CR4_LA57)) fault(c, EXC_GP, 0);
@@ -1073,6 +1092,10 @@ void sys_write_cr(CPU *c, int n, uint64_t v) {
     }
     case 8:
         if (v & ~15ULL) fault(c, EXC_GP, 0);
+        if (c->vmx.guest && (c->vmx.proc & PROC_TPR)) {
+            vmx_cr8_write(c, v);
+            return;
+        }
         c->cr8 = v;
         if (c->tpr_hook) c->tpr_hook(c, (int)v);
         return;
@@ -1082,11 +1105,11 @@ void sys_write_cr(CPU *c, int n, uint64_t v) {
 
 uint64_t sys_read_cr(CPU *c, int n) {
     switch (n) {
-    case 0: return c->cr0;
+    case 0: return c->vmx.guest ? vmx_cr_read(c, 0) : c->cr0;
     case 2: return c->cr2;
     case 3: return c->cr3;
-    case 4: return c->cr4;
-    case 8: return c->cr8;
+    case 4: return c->vmx.guest ? vmx_cr_read(c, 4) : c->cr4;
+    case 8: return c->vmx.guest && (c->vmx.proc & PROC_TPR) ? vmx_cr8_read(c) : c->cr8;
     }
     fault(c, EXC_UD, 0);
 }
@@ -1149,6 +1172,13 @@ StepResult sys_step(CPU *c) {
             c->snap_valid = 0;
             return STEP_OK;
         }
+        if (c->vmx_jump) { /* the instruction (or event delivery) caused a VM exit */
+            c->vmx_jump = 0;
+            if (c->snap_valid) sys_restore(c);
+            vmx_exit(c);
+            c->dbg_hits = 0;
+            return STEP_OK;
+        }
         if (c->exc_unimpl) return STEP_EXCEPTION;
         if (c->snap_valid) sys_restore(c);
         if (tx_active(c)) { /* exceptions abort transactions and are not delivered */
@@ -1158,8 +1188,24 @@ StepResult sys_step(CPU *c) {
         }
         int vec = c->exc_vector;
         uint64_t code = c->exc_code;
+        if (c->vmx.guest) { /* the exception bitmap: exit instead of delivering (CR2 untouched) */
+            if (vmx_exc_exits(c, vec, 3, exc_has_error(vec) && pmode(c), code, vec == EXC_PF ? c->exc_addr : 0)) {
+                vmx_exit(c);
+                c->dbg_hits = 0;
+                return STEP_OK;
+            }
+            if (vec == EXC_PF) c->cr2 = c->exc_addr;
+        }
         if (c->delivering >= 0) {
             int first = c->delivering;
+            if (first == EXC_DF && c->vmx.guest) { /* triple fault in the guest */
+                c->vmx.in_delivery = 0;
+                c->vmx.x_reason = 2;
+                c->vmx.x_qual = c->vmx.x_intinfo = c->vmx.x_interr = c->vmx.x_info = c->vmx.x_len = 0;
+                c->vmx.x_gpa = c->vmx.x_gla = 0;
+                vmx_exit(c);
+                return STEP_OK;
+            }
             if (first == EXC_DF) {
                 c->delivering = -1;
                 snprintf(c->exc_msg, sizeof c->exc_msg, "triple fault (shutdown)");
@@ -1168,6 +1214,10 @@ StepResult sys_step(CPU *c) {
             if ((contributory(first) && contributory(vec)) || (first == EXC_PF && (contributory(vec) || vec == EXC_PF))) {
                 vec = EXC_DF;
                 code = 0;
+                if (c->vmx.guest && vmx_exc_exits(c, vec, 3, 1, 0, 0)) {
+                    vmx_exit(c);
+                    return STEP_OK;
+                }
             }
         }
         if (c->break_on_exception && c->delivering < 0) return STEP_EXCEPTION;
@@ -1187,14 +1237,22 @@ StepResult sys_step(CPU *c) {
         tx_abort(c, tx_doomed(c));
         return STEP_OK;
     }
-    if (c->smi_pending && !c->smm && !c->wait_sipi) { /* SMI: above NMI and interrupts */
+    c->vmx.in_delivery = 0;
+    if (c->vmx.init_pending && !c->vmx.on && c->on_init) { /* an INIT held during VMX operation */
+        c->vmx.init_pending = 0;
+        c->on_init(c);
+        return STEP_OK;
+    }
+    if (c->smi_pending && !c->smm && !c->wait_sipi && !c->vmx.guest) { /* SMI: above NMI and interrupts */
         tx_abort(c, 0);
         smm_enter(c);
         return STEP_OK;
     }
     int shadow = c->intr_shadow;
     c->intr_shadow = 0;
-    if (c->nmi_pending && !c->nmi_blocked && !shadow) {
+    int guest = c->vmx.guest;
+    if (guest && vmx_boundary(c, shadow)) return STEP_OK;
+    if (c->nmi_pending && !c->nmi_blocked && !shadow && !(guest && (c->vmx.pin & PIN_NMI))) {
         tx_abort(c, 0);
         c->nmi_pending = 0;
         c->nmi_blocked = 1;
@@ -1206,7 +1264,7 @@ StepResult sys_step(CPU *c) {
         c->delivering = -1;
         return STEP_OK;
     }
-    if (c->irq_line && (c->rflags & FL_IF) && !shadow && c->get_interrupt) {
+    if (c->irq_line && (c->rflags & FL_IF) && !shadow && c->get_interrupt && !(guest && (c->vmx.pin & PIN_EXTINT))) {
         int v = c->get_interrupt(c);
         if (v >= 0) {
             tx_abort(c, 0); /* interrupts abort a transaction, then arrive at its fallback */
@@ -1233,7 +1291,8 @@ StepResult sys_step(CPU *c) {
 
     /* fetch and decode, through the decoded-instruction cache */
     ICache *ic = c->icache;
-    uint64_t pa = ((c->cr0 & CR0_PG) ? mmu_translate(c, pc, ACC_X) : pc) & c->a20_mask;
+    c->vmx.insn_len = 0;
+    uint64_t pa = (cpu_translated(c) ? mmu_translate(c, pc, ACC_X) : pc) & c->a20_mask;
     uint32_t pg = (uint32_t)(pa >> 12) & (IC_PAGES - 1);
     __typeof__(ic->e[0]) *e = &ic->e[(pa ^ (pa >> 13)) & (IC_SIZE - 1)];
     Insn *ip = &e->in;
@@ -1248,7 +1307,7 @@ StepResult sys_step(CPU *c) {
         uint8_t buf[15];
         size_t n;
         e->pa1 = 0;
-        if (c->cr0 & CR0_PG) n = mmu_fetch(c, pc, buf, sizeof buf);
+        if (cpu_translated(c)) n = mmu_fetch(c, pc, buf, sizeof buf);
         else {
             phys_fetch(c, pc, buf, sizeof buf);
             n = sizeof buf;
@@ -1270,12 +1329,14 @@ StepResult sys_step(CPU *c) {
     }
     if (c->ibt_wait) cet_check_endbr(c, inp);
     int old_cpl = c->cpl;
+    c->vmx.insn_len = inp->len;
 
     uint64_t tf = c->rflags & FL_TF;
     c->next_rip = (c->rip + inp->len) & (c->bits == 64 ? ~0ULL : c->bits == 32 ? 0xFFFFFFFFULL : 0xFFFF);
     c->rf_keep = 0;
     c->dbg_hits = 0;
     c->snap_valid = 0;
+    if (guest) vmx_intercept(c, inp);
     cpu_execute(c, inp);
     if (c->cr4 & CR4_CET) {
         switch (inp->id) {
@@ -1289,15 +1350,24 @@ StepResult sys_step(CPU *c) {
     if (c->pmu.watch) pmu_retire(c, inp, old_cpl);
     if (!c->rf_keep) c->rflags &= ~FL_RF;
 
-    if ((tf || c->dbg_hits) && tx_active(c)) { /* debug traps abort a transaction */
+    if (guest && c->vmx.guest && c->vmx.trap_reason) { /* trap-like exits come before debug traps */
+        c->dbg_hits = 0;
+        vmx_trap(c);
+    } else if ((tf || c->dbg_hits) && tx_active(c)) { /* debug traps abort a transaction */
         tx_abort(c, 0x10);
         c->dbg_hits = 0;
+    } else if ((tf || c->dbg_hits) && guest && c->vmx.guest &&
+               vmx_exc_exits(c, EXC_DB, 3, 0, 0, c->dbg_hits | (tf ? 0x4000 : 0))) {
+        c->dbg_hits = 0; /* the pending debug bits go in the exit qualification, not DR6 */
+        vmx_exit(c);
     } else if (tf || c->dbg_hits) {
         c->dr[6] = (c->dr[6] & ~0xFULL) | c->dbg_hits | (tf ? 0x4000 : 0);
         c->dbg_hits = 0;
         c->delivering = EXC_DB;
         sys_deliver(c, EXC_DB, EV_EXC, 0, 0, c->rip);
         c->delivering = -1;
+    } else if (guest && c->vmx.guest) {
+        vmx_after_insn(c);
     }
     return c->stop_request ? STEP_STOP : STEP_OK;
 }
@@ -1407,8 +1477,8 @@ void exec_system(CPU *c, const Insn *in) {
     }
     case I_SMSW:
         umip_check(c);
-        if (in->mod == 3) setreg(c, in->rm, os, 1, c->sys ? c->cr0 : 0x80050033);
-        else wrm(c, ea_linear(c, in), 2, (c->sys ? c->cr0 : 0x80050033) & 0xFFFF);
+        if (in->mod == 3) setreg(c, in->rm, os, 1, c->sys ? sys_read_cr(c, 0) : 0x80050033);
+        else wrm(c, ea_linear(c, in), 2, (c->sys ? sys_read_cr(c, 0) : 0x80050033) & 0xFFFF);
         return;
     case I_LMSW: {
         need_cpl0(c);
@@ -1489,7 +1559,7 @@ void exec_system(CPU *c, const Insn *in) {
     }
     case I_CLTS:
         need_cpl0(c);
-        c->cr0 &= ~CR0_TS;
+        if (!(c->vmx.guest && (c->vmx.cr0_mask & CR0_TS))) c->cr0 &= ~CR0_TS; /* owned by the host: unchanged */
         return;
     case I_INVD: case I_WBINVD: /* INVD writes back too: dropping dirty lines would lose data */
         need_cpl0(c);
@@ -1609,6 +1679,9 @@ void exec_system(CPU *c, const Insn *in) {
             return;
         case 0xE8: /* SERIALIZE */
             return;
+        case 0xC1: case 0xC2: case 0xC3: case 0xC4: case 0xD4: /* VMCALL VMLAUNCH VMRESUME VMXOFF VMFUNC */
+            exec_vmx(c, in);
+            return;
         case 0xD5: /* XEND */
             tx_end(c);
             return;
@@ -1622,6 +1695,10 @@ void exec_system(CPU *c, const Insn *in) {
         return;
     case I_UD0: case I_UD1:
         fault(c, EXC_UD, 0);
+    case I_VMXON: case I_VMCLEAR: case I_VMPTRLD: case I_VMPTRST: case I_VMREAD: case I_VMWRITE:
+    case I_INVEPT: case I_INVVPID:
+        exec_vmx(c, in);
+        return;
     }
     unimplemented(c, in);
 }

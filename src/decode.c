@@ -152,6 +152,7 @@ static const OpDef map0f[256] = {
     [0x7E] = PF, [0x7F] = PF,
     [0x80 ... 0x8F] = OP1(JCC, Jz, F_F64),
     [0x90 ... 0x9F] = OP1(SETCC, Eb, 0),
+    [0x78] = OP2(VMREAD, Ey, Gy, F_F64), [0x79] = OP2(VMWRITE, Gy, Ey, F_F64),
     [0xA0] = OP1(PUSH, FS, F_D64), [0xA1] = OP1(POP, FS, F_D64), [0xA2] = OP0(CPUID, 0),
     [0xA3] = OP2(BT, Ev, Gv, 0), [0xA4] = OP3(SHLD, Ev, Gv, Ib, 0), [0xA5] = OP3(SHLD, Ev, Gv, CL, 0),
     [0xA8] = OP1(PUSH, GS, F_D64), [0xA9] = OP1(POP, GS, F_D64),
@@ -277,6 +278,7 @@ static const OpDef pfx0f38[256][4] = {
     [0xCC] = {OP2(SHA256MSG1, Vx, Wx, 0)}, [0xCD] = {OP2(SHA256MSG2, Vx, Wx, 0)},
     [0xDB] = S66(AESIMC, Vx, Wx), [0xDC] = S66(AESENC, Vx, Wx), [0xDD] = S66(AESENCLAST, Vx, Wx),
     [0xDE] = S66(AESDEC, Vx, Wx), [0xDF] = S66(AESDECLAST, Vx, Wx),
+    [0x80] = {{0}, OP2(INVEPT, Gy, M, 0)}, [0x81] = {{0}, OP2(INVVPID, Gy, M, 0)},
     [0x82] = {{0}, OP2(INVPCID, Gy, M, 0)},
     [0xF0] = {OP2(MOVBE, Gv, Ev, 0), OP2(MOVBE, Gv, Ev, 0), {0}, OP2(CRC32, Gy, Eb, 0)},
     [0xF1] = {OP2(MOVBE, Ev, Gv, 0), OP2(MOVBE, Ev, Gv, 0), {0}, OP2(CRC32, Gy, Ev, 0)},
@@ -325,7 +327,7 @@ static const OpDef groups[NGROUPS][2][8] = {
              OP1(SMSW, Ev, 0), OP0(GRP7R, 0), OP1(LMSW, Ew, 0), OP0(GRP7R, 0)}},
     [G8] = SAME({0}, {0}, {0}, {0}, OP2(BT, Ev, Ib, 0), OP2(BTS, Ev, Ib, F_LOCK),
                 OP2(BTR, Ev, Ib, F_LOCK), OP2(BTC, Ev, Ib, F_LOCK)),
-    [G9] = {{{0}, OP1(CMPXCHG8B, Mq, F_LOCK)},
+    [G9] = {{{0}, OP1(CMPXCHG8B, Mq, F_LOCK), [6] = OP1(VMPTRLD, Mq, 0), [7] = OP1(VMPTRST, Mq, 0)},
             {[6] = OP1(RDRAND, Ev, 0), [7] = OP1(RDSEED, Ev, 0)}}, /* F3 /7 reg: RDPID (in exec) */
     [G12] = {{{0}}, {[2] = OP0(PSRLW, 0), [4] = OP0(PSRAW, 0), [6] = OP0(PSLLW, 0)}},
     [G13] = {{{0}}, {[2] = OP0(PSRLD, 0), [4] = OP0(PSRAD, 0), [6] = OP0(PSLLD, 0)}},
@@ -685,6 +687,10 @@ have_def:;
         else if (in->id == I_XSAVEOPT) in->id = I_CLRSSBSY;
         else if (in->id == I_GRP7R && in->modrm == 0xE8) in->id = I_SETSSBSY;
         else if (in->id == I_GRP7R && in->modrm == 0xEA) in->id = I_SAVEPREVSSP;
+    }
+    if (in->id == I_VMPTRLD) { /* 0F C7 /6: VMPTRLD, 66: VMCLEAR, F3: VMXON */
+        if (in->rep == 0xF3) in->id = I_VMXON;
+        else if (in->pfx66) in->id = I_VMCLEAR;
     }
     if (in->id == I_RSTORSSP && in->rep != 0xF3) return DEC_INVALID;
     if ((in->id == I_WRSS || in->id == I_WRUSS) && in->mod == 3) return DEC_INVALID;
