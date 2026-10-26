@@ -85,6 +85,10 @@ byte to port 0xF4 exits with that code.
   Clicking a line shows its 64 bytes, highlighting bytes that differ from
   main memory, i.e. written but not yet written back.
 
+The **Guide** button opens a user guide (`ui/guide.html`) covering every
+feature: running programs, the debugger, the editor, the PC, SMP, caches,
+the CPU features including VMX, and the terminal debugger.
+
 The server binds to 127.0.0.1 only.
 
 ## Assembly editor

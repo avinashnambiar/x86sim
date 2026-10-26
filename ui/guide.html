@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>x86sim Guide</title>
+  <style>
+    :root {
+      --bg: #0f1216;
+      --panel: #161a20;
+      --panel-2: #1c2129;
+      --border: #262c36;
+      --text: #d7dce4;
+      --muted: #8a94a3;
+      --accent: #5aa9ff;
+      --ok: #4fd18b;
+      --warn: #ffb547;
+      --bad: #ff5c6c;
+      --m: #ff7ab6;
+      --e: #4fd18b;
+      --s: #5aa9ff;
+      --i: #6b7686;
+      --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color-scheme: dark;
+    }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) {
+        --bg: #eef1f5;
+        --panel: #ffffff;
+        --panel-2: #f5f7fa;
+        --border: #dde2ea;
+        --text: #1d232c;
+        --muted: #5c6877;
+        --accent: #1f6fd6;
+        --ok: #1d9a5b;
+        --warn: #a8691a;
+        --bad: #d6303f;
+        --m: #c2307a;
+        --e: #1d9a5b;
+        --s: #1f6fd6;
+        --i: #8a94a3;
+        color-scheme: light;
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 var(--sans); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, kbd, pre { font-family: var(--mono); font-size: 0.86em; }
+    code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+    kbd { background: var(--panel-2); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+    pre { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.5; }
+    pre code { background: none; border: 0; padding: 0; font-size: 1em; }
+    .c { color: var(--muted); }
+
+    .top { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 14px; padding: 10px 20px;
+           background: var(--panel); border-bottom: 1px solid var(--border); }
+    .logo { font: 600 17px var(--mono); letter-spacing: -0.5px; color: var(--text); }
+    .logo b { color: var(--accent); }
+    .top .title { color: var(--muted); font-size: 14px; }
+    .top .back { margin-left: auto; white-space: nowrap; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; background: var(--panel-2); }
+
+    .wrap { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 40px; max-width: 1180px; margin: 0 auto; padding: 24px 20px 80px; }
+    nav.toc { position: sticky; top: 64px; align-self: start; max-height: calc(100vh - 80px); overflow-y: auto; font-size: 13.5px; }
+    nav.toc ol { list-style: none; margin: 0; padding: 0; }
+    nav.toc li { margin: 1px 0; }
+    nav.toc a { display: block; padding: 3px 10px; border-left: 2px solid var(--border); color: var(--muted); }
+    nav.toc a:hover { color: var(--text); border-left-color: var(--accent); text-decoration: none; }
+    nav.toc .sub a { padding-left: 22px; font-size: 12.5px; }
+
+    main { min-width: 0; max-width: 820px; }
+    h1 { font-size: 30px; line-height: 1.2; margin: 6px 0 8px; letter-spacing: -0.5px; }
+    .lede { color: var(--muted); font-size: 16.5px; margin: 0 0 28px; }
+    h2 { font-size: 22px; margin: 52px 0 10px; padding-top: 18px; border-top: 1px solid var(--border); letter-spacing: -0.2px; }
+    h3 { font-size: 16.5px; margin: 28px 0 6px; }
+    p, ul, ol { margin: 8px 0 12px; }
+    li { margin: 3px 0; }
+
+    table { width: 100%; border-collapse: collapse; margin: 10px 0 18px; font-size: 14px; }
+    th, td { text-align: left; vertical-align: top; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+    td:first-child { white-space: nowrap; }
+    .tw { overflow-x: auto; }
+
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin: 14px 0 6px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+    .card h4 { margin: 0 0 4px; font-size: 14.5px; }
+    .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+    .card a.more { display: inline-block; margin-top: 8px; font-size: 13px; }
+
+    .note { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 10px 14px; margin: 14px 0; font-size: 14px; }
+    .note.warn { border-left-color: var(--warn); }
+    .steps { counter-reset: s; list-style: none; padding: 0; }
+    .steps > li { counter-increment: s; position: relative; padding-left: 34px; margin: 10px 0; }
+    .steps > li::before { content: counter(s); position: absolute; left: 0; top: 1px; width: 22px; height: 22px; border-radius: 50%;
+                          background: var(--panel-2); border: 1px solid var(--border); font-size: 12px; font-weight: 600;
+                          display: flex; align-items: center; justify-content: center; }
+
+    .mesi { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+    .mesi span { font: 600 13px var(--mono); padding: 3px 10px; border-radius: 6px; border: 1px solid; }
+    .mesi .m { color: var(--m); border-color: var(--m); }
+    .mesi .e { color: var(--e); border-color: var(--e); }
+    .mesi .s { color: var(--s); border-color: var(--s); }
+    .mesi .i { color: var(--i); border-color: var(--i); }
+
+    .layout-fig { display: grid; grid-template-columns: 1.4fr 1fr; grid-template-rows: auto auto auto; gap: 6px; margin: 14px 0 6px; font-size: 12.5px; }
+    .layout-fig div { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+    .layout-fig b { display: block; font-size: 13px; }
+    .layout-fig span { color: var(--muted); }
+    .layout-fig .bar { grid-column: 1 / -1; }
+    .layout-fig .left { grid-row: 2 / 3; min-height: 92px; }
+    .layout-fig .bottom { grid-column: 1 / -1; }
+
+    @media (max-width: 860px) {
+      .wrap { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 16px 16px 60px; }
+      nav.toc { position: static; max-height: none; margin-bottom: 8px; background: var(--panel); border: 1px solid var(--border);
+                border-radius: 10px; padding: 10px; }
+      nav.toc .sub { display: none; }
+      h1 { font-size: 25px; }
+      .layout-fig { grid-template-columns: 1fr; }
+      .layout-fig .left { grid-row: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <span class="logo">x86<b>sim</b></span>
+    <span class="title">Guide</span>
+    <a class="back" href="/">&larr; Back to the debugger</a>
+  </header>
+
+  <div class="wrap">
+    <nav class="toc" aria-label="Contents">
+      <ol>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#quickstart">Quick start</a></li>
+        <li><a href="#running">Running programs</a></li>
+        <li class="sub"><a href="#inputs">What it can run</a></li>
+        <li class="sub"><a href="#options">Command-line options</a></li>
+        <li class="sub"><a href="#x86cc">Compiling with x86cc</a></li>
+        <li><a href="#debugger">The web debugger</a></li>
+        <li class="sub"><a href="#controls">Execution controls</a></li>
+        <li class="sub"><a href="#panels">Panels</a></li>
+        <li class="sub"><a href="#tabs">Bottom tabs</a></li>
+        <li><a href="#editor">Assembly editor</a></li>
+        <li class="sub"><a href="#editor-flow">Writing and loading</a></li>
+        <li class="sub"><a href="#editor-modes">Modes and memory slots</a></li>
+        <li class="sub"><a href="#editor-examples">Examples</a></li>
+        <li><a href="#pc">The PC machine</a></li>
+        <li class="sub"><a href="#pc-devices">Devices</a></li>
+        <li class="sub"><a href="#pc-ports">Special I/O ports</a></li>
+        <li class="sub"><a href="#pc-linux">Booting Linux and disks</a></li>
+        <li><a href="#smp">Multiple CPUs</a></li>
+        <li><a href="#caches">Caches and MESI</a></li>
+        <li class="sub"><a href="#caches-tab">The Caches tab</a></li>
+        <li class="sub"><a href="#caches-port">Querying from a program</a></li>
+        <li><a href="#cpu">CPU features</a></li>
+        <li class="sub"><a href="#isa">Instruction set</a></li>
+        <li class="sub"><a href="#system">System architecture</a></li>
+        <li class="sub"><a href="#pmu">Performance counters</a></li>
+        <li class="sub"><a href="#tsx">Transactional memory</a></li>
+        <li class="sub"><a href="#smm">System management mode</a></li>
+        <li class="sub"><a href="#x2apic">x2APIC and VT-d</a></li>
+        <li class="sub"><a href="#vmx">Virtualization (VMX)</a></li>
+        <li><a href="#terminal">Terminal debugger</a></li>
+        <li><a href="#testing">Testing</a></li>
+        <li><a href="#limits">Limits</a></li>
+      </ol>
+    </nav>
+
+    <main>
+      <h1 id="overview">x86sim guide</h1>
+      <p class="lede">x86sim is an x86-64 CPU simulator with this web debugger. It runs programs in 16-bit
+        real mode and 32/64-bit Linux user mode, and it emulates a whole PC that boots a stock Linux kernel
+        on up to 255 CPUs, optionally through simulated caches, and can run KVM virtual machines on its
+        simulated VMX.</p>
+
+      <div class="cards">
+        <div class="card"><h4>Step through programs</h4><p>Breakpoints, step into, over and out, and editable registers, stack and memory.</p><a class="more" href="#debugger">The debugger &rarr;</a></div>
+        <div class="card"><h4>Write bare-metal code</h4><p>Assemble in the browser and load onto any CPU, in 16-, 32- or 64-bit mode.</p><a class="more" href="#editor">The editor &rarr;</a></div>
+        <div class="card"><h4>Watch the caches</h4><p>L1/L2 contents, MESI states and the coherence traffic between cores, live.</p><a class="more" href="#caches">Caches &rarr;</a></div>
+        <div class="card"><h4>Boot real systems</h4><p>Linux on many CPUs, disk images, and KVM guests running on the simulated CPU.</p><a class="more" href="#pc">The PC &rarr;</a></div>
+      </div>
+
+      <div class="note">The simulator models <b>architectural behavior</b>: what each instruction does to
+        registers, memory, and the machine. It has no pipeline, branch predictor or cycle timing. Time is
+        virtual: each round, every running CPU executes one instruction, and a round counts as 1 ns. Runs are
+        therefore fully reproducible.</div>
+
+      <h2 id="quickstart">Quick start</h2>
+      <pre><code>make                                    <span class="c"># build ./x86sim (just needs a C compiler)</span>
+
+./x86cc --ui tests/c/algo.c             <span class="c"># compile a C program and open it in this debugger</span>
+./x86sim -u --smp 4 --cache             <span class="c"># an empty 4-CPU PC: write assembly in the Editor</span>
+./x86sim --kernel bzImage --initrd initrd.cpio   <span class="c"># boot Linux on the serial console</span></code></pre>
+      <p>The web debugger listens on <a href="http://127.0.0.1:8086">http://127.0.0.1:8086</a> (only on
+        the local machine). Use <code>-p N</code> to choose another port.</p>
+
+      <h2 id="running">Running programs</h2>
+      <h3 id="inputs">What it can run</h3>
+      <ul>
+        <li><b>ELF object files (<code>.o</code>)</b>. The simulator has its own linker, so
+          <code>clang -target x86_64-linux-gnu -c</code> (or <code>i386-linux-gnu</code>) is all you need.
+          Several <code>.o</code> files are linked together. Execution starts at <code>_start</code>, or at
+          <code>main</code> through a generated stub.</li>
+        <li><b>Static ELF executables</b>, 32- or 64-bit, including static-PIE (for example musl
+          <code>-static</code> binaries). Dynamically linked executables are refused.</li>
+        <li><b>Flat binaries</b>, loaded as a DOS <code>.COM</code> program at <code>1000:0100</code> in real
+          mode, with DOS <code>int 21h</code> and BIOS services.</li>
+        <li><b>Boot images, disk images and Linux kernels</b> in PC mode (see <a href="#pc">the PC
+          machine</a>).</li>
+      </ul>
+      <p>User-mode programs talk to the simulator through Linux system calls (about 45 of them, through
+        <code>syscall</code> in 64-bit code and <code>int 0x80</code> in 32-bit code). In the debugger the
+        program pauses in <code>read()</code> until you type a line in the Console.</p>
+
+      <h3 id="options">Command-line options</h3>
+      <p><code>x86sim [options] &lt;program&gt; [more.o ...] [-- program args]</code></p>
+      <div class="tw"><table>
+        <tr><th>Option</th><th>What it does</th></tr>
+        <tr><td><code>-u</code>, <code>--ui</code></td><td>Start this web debugger. With no program in PC mode, start an empty PC for the editor.</td></tr>
+        <tr><td><code>-p</code>, <code>--port N</code></td><td>Web debugger port (default 8086).</td></tr>
+        <tr><td><code>-d</code>, <code>--debug</code></td><td>Start the <a href="#terminal">terminal debugger</a> instead.</td></tr>
+        <tr><td><code>-b</code>, <code>--bits 16|32|64</code></td><td>Force the CPU mode.</td></tr>
+        <tr><td><code>-t</code>, <code>--trace</code></td><td>Print every instruction as it executes.</td></tr>
+        <tr><td><code>-s</code>, <code>--strace</code></td><td>Print system calls as they happen.</td></tr>
+        <tr><td><code>-m</code>, <code>--max N</code></td><td>Stop after N instructions (in PC mode, N rounds of one instruction per CPU).</td></tr>
+        <tr><td><code>--pc</code></td><td>Full-system PC: the program is a boot image (a flat binary, or <code>.o</code> files linked at 0x7C00) started in real mode.</td></tr>
+        <tr><td><code>--ram MB</code></td><td>PC memory size (default 256 MB).</td></tr>
+        <tr><td><code>--hda F</code>, <code>--fda F</code>, <code>--boot a|c</code></td><td>Hard disk and floppy images, and which one to boot from.</td></tr>
+        <tr><td><code>--kernel F</code>, <code>--initrd F</code>, <code>--append S</code></td><td>Boot a Linux bzImage with an initramfs and a kernel command line.</td></tr>
+        <tr><td><code>--smp N</code></td><td>A PC with N CPUs (1–255).</td></tr>
+        <tr><td><code>--cache</code></td><td>Simulate the cache hierarchy. <code>--cache-stats</code> also prints statistics at exit.</td></tr>
+      </table></div>
+      <p>Every option from <code>--pc</code> down implies PC mode.</p>
+
+      <h3 id="x86cc">Compiling with x86cc</h3>
+      <p><code>x86cc</code> wraps clang with the right flags and links the small runtime in
+        <code>runtime/</code>, which provides <code>print_str</code>, <code>print_u64</code>,
+        <code>print_i64</code>, <code>print_hex</code>, <code>sim_read</code>, <code>sim_write</code>,
+        <code>memcpy</code> and similar helpers.</p>
+      <pre><code>./x86cc --run examples/greet.c          <span class="c"># compile and run</span>
+./x86cc --ui  tests/c/algo.c            <span class="c"># compile and open the web debugger</span>
+./x86cc --debug prog.c                  <span class="c"># compile and start the terminal debugger</span>
+./x86cc --run --32 prog.c               <span class="c"># 32-bit (i386) build</span>
+./x86cc --run --16 examples/hello16.s   <span class="c"># 16-bit real-mode DOS program</span>
+./x86cc --run -O2 prog.c -- arg1 arg2   <span class="c"># optimization level and program arguments</span></code></pre>
+
+      <h2 id="debugger">The web debugger</h2>
+      <div class="layout-fig" aria-hidden="true">
+        <div class="bar"><b>Top bar</b><span>program · mode · execution controls · state · instruction count</span></div>
+        <div class="left"><b>Disassembly | Editor</b><span>code around RIP, breakpoints, navigation; or the assembly editor</span></div>
+        <div><b>Registers, Stack, Memory</b><span>CPU switcher in PC mode; edit values in place</span></div>
+        <div class="bottom"><b>Bottom tabs</b><span>Screen · Console · System calls · Trace · Memory map · Caches · Symbols</span></div>
+      </div>
+
+      <h3 id="controls">Execution controls</h3>
+      <div class="tw"><table>
+        <tr><th>Button</th><th>Keys</th><th>What it does</th></tr>
+        <tr><td>Step</td><td><kbd>F11</kbd> or <kbd>S</kbd></td><td>Execute one instruction, entering calls.</td></tr>
+        <tr><td>Over</td><td><kbd>F10</kbd> or <kbd>N</kbd></td><td>Step, but run a call to completion.</td></tr>
+        <tr><td>Out</td><td><kbd>Shift</kbd>+<kbd>F11</kbd> or <kbd>F</kbd></td><td>Run until the current function returns.</td></tr>
+        <tr><td>Run</td><td><kbd>F5</kbd> or <kbd>C</kbd></td><td>Run until a breakpoint, an exception, input, or the end.</td></tr>
+        <tr><td>Pause</td><td><kbd>F6</kbd></td><td>Stop a running program.</td></tr>
+        <tr><td>Reset</td><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Restart. In PC mode, it also reloads every program loaded from the editor.</td></tr>
+        <tr><td>Load</td><td></td><td>Load another program: paths of files on this machine, arguments, and the mode.</td></tr>
+      </table></div>
+      <p>The status pill shows the state: <i>paused</i>, <i>running</i>, <i>needs input</i> (the program
+        waits in <code>read()</code>), <i>halted</i>, <i>exited</i> or <i>fault</i>. Next to it are the
+        reason the run stopped and the instruction count.</p>
+
+      <h3 id="panels">Panels</h3>
+      <ul>
+        <li><b>Disassembly</b> follows RIP while <i>Follow RIP</i> is on. Click the gutter or double-click a
+          line to toggle a breakpoint. Click a jump or call target to navigate. Type an address or symbol in
+          the box to browse elsewhere.</li>
+        <li><b>Registers</b> highlights what the last step changed. Click a register to edit it, and click a
+          flag to toggle it. XMM registers are shown on demand. In PC mode the header also shows the control
+          registers and the operating mode, including <i>VMX root</i> or <i>VMX guest</i> when a hypervisor
+          is running.</li>
+        <li><b>Stack</b> lists the stack words, with return addresses resolved to
+          <code>function+offset</code>.</li>
+        <li><b>Memory</b> is a hex view. The address box accepts hex numbers, symbols, registers and
+          <code>reg+offset</code>.</li>
+        <li><b>CPU switcher</b> (PC mode with several CPUs): registers, disassembly, stack and memory follow
+          the selected CPU. There are buttons for up to 8 CPUs, and a drop-down with a running/halted summary
+          beyond that.</li>
+      </ul>
+
+      <h3 id="tabs">Bottom tabs</h3>
+      <div class="tw"><table>
+        <tr><th>Tab</th><th>Shows</th></tr>
+        <tr><td>Screen</td><td>PC mode: the VGA text screen and mode 13h graphics. Click it and type to send keystrokes.</td></tr>
+        <tr><td>Console</td><td>Program output, or output written to port 0xE9 in PC mode. Type here to give a program its input.</td></tr>
+        <tr><td>System calls</td><td>The program's recent system calls, with a count in the tab title.</td></tr>
+        <tr><td>Trace</td><td>The most recently executed instructions. Click one to show it in the disassembly.</td></tr>
+        <tr><td>Memory map</td><td>The memory regions: address range, protection and name.</td></tr>
+        <tr><td>Caches</td><td>With <code>--cache</code>: statistics, line states and live cache contents (see <a href="#caches-tab">below</a>).</td></tr>
+        <tr><td>Symbols</td><td>The program's symbols, with a filter box. Click one to go to it.</td></tr>
+      </table></div>
+
+      <h2 id="editor">Assembly editor</h2>
+      <p>The <b>Editor</b> view (next to Disassembly) is for writing bare-metal programs and loading them
+        onto any CPU of a PC. <code>x86sim -u</code> without a program starts an empty PC and opens the
+        editor; add <code>--smp N</code> and <code>--cache</code> as you like. <b>New machine</b> in the
+        editor replaces the current machine with an empty one of any size.</p>
+
+      <h3 id="editor-flow">Writing and loading</h3>
+      <ol class="steps">
+        <li>Pick an example from <b>Examples…</b> or write your own. Execution starts at <code>_start</code>,
+          or at the first instruction.</li>
+        <li>Choose the <b>Mode</b> (16-bit real, 32-bit protected, 64-bit long) and the <b>Syntax</b>
+          (AT&amp;T, or Intel, which adds <code>.intel_syntax noprefix</code>).</li>
+        <li>Choose the CPU in <b>Load on</b> and, if you want, a physical address in <b>at</b>.</li>
+        <li><b>Assemble</b> only checks for errors, which are marked in the gutter; click one to jump to it.
+          <b>Load</b> places the program and leaves the CPU ready to step in the disassembly view.
+          <b>Load &amp; Run</b> (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) starts it at once. <b>Memory only</b>
+          writes the code without starting a CPU, for example as the target of your own INIT/STARTUP
+          IPIs.</li>
+      </ol>
+      <p>Programs are assembled by <code>clang</code> (set <code>X86SIM_CLANG</code> to use another) and
+        linked by the simulator. The draft is kept in your browser.</p>
+
+      <h3 id="editor-modes">Modes and memory slots</h3>
+      <p>The CPU starts directly in the chosen mode, with interrupts off:</p>
+      <ul>
+        <li><b>16-bit real mode:</b> CS = DS = ES = SS = address / 16. BIOS services are available.</li>
+        <li><b>32-bit protected mode:</b> flat segments (code 0x08, data 0x10).</li>
+        <li><b>64-bit long mode:</b> code segment 0x18, with the first 4 GiB identity-mapped by 2 MiB
+          pages.</li>
+      </ul>
+      <p>The GDT, IDTs and page tables live at 0x100000–0x10FFFF. Every CPU has a default slot, with code at
+        the bottom and its stack at the top:</p>
+      <div class="tw"><table>
+        <tr><th>Mode</th><th>Default load address</th></tr>
+        <tr><td>32- and 64-bit</td><td><code>0x200000 + cpu × 64 KiB</code></td></tr>
+        <tr><td>16-bit</td><td><code>0x10000 + cpu × 4 KiB</code></td></tr>
+      </table></div>
+      <p>A load is refused if its code and stack would overlap another loaded program; reloading the same
+        CPU replaces its old program. A running program can still write anywhere, because on bare metal
+        every CPU sees all of physical memory.</p>
+      <ul>
+        <li>Print by writing bytes to port <code>0xE9</code>; they appear in the Console.</li>
+        <li><code>cli; hlt</code> stops a CPU. The run ends when every CPU has stopped.</li>
+        <li>Until a program installs its own IDT, an exception stops the run with a report such as
+          <code>cpu1: unhandled #UD invalid opcode at 0x210004</code>, and halts only that CPU.</li>
+      </ul>
+
+      <h3 id="editor-examples">Examples</h3>
+      <div class="tw"><table>
+        <tr><th>Example</th><th>Try</th></tr>
+        <tr><td>Hello (16, 32, 64-bit, Intel syntax)</td><td>The minimal program in each mode: a loop writing to port 0xE9.</td></tr>
+        <tr><td>Which CPU am I?</td><td>Load it on several CPUs, then Run. Each prints its APIC ID, taking turns through a spinlock in shared memory.</td></tr>
+        <tr><td>Shared counter</td><td>Load on two or more CPUs, then Run: each adds 100,000 to one counter with <code>LOCK INC</code>. Remove the <code>lock</code> (after New machine) to see updates get lost. With <code>--cache</code>, enter the counter's address in the Caches tab and watch its line move between cores.</td></tr>
+        <tr><td>Exception</td><td>A divide error reported by the default handler; then try <code>ud2</code>, <code>int3</code>, or your own IDT.</td></tr>
+      </table></div>
+
+      <h2 id="pc">The PC machine</h2>
+      <p>PC mode emulates a complete machine with firmware, so real boot code and operating systems run
+        unmodified.</p>
+      <h3 id="pc-devices">Devices</h3>
+      <ul>
+        <li>BIOS services (HLE), with ACPI and MP tables describing the machine.</li>
+        <li>8259 interrupt controllers, the 8254 timer, CMOS clock, 8042 keyboard controller.</li>
+        <li>A 16550 serial port, which is the terminal when you run from the command line (<kbd>Ctrl</kbd>+<kbd>]</kbd> quits).</li>
+        <li>VGA text mode and mode 13h (the Screen tab), PCI, and IDE disks and floppies.</li>
+        <li>Per-CPU local APICs (xAPIC and x2APIC), an I/O APIC, and a VT-d remapping unit.</li>
+      </ul>
+      <h3 id="pc-ports">Special I/O ports</h3>
+      <div class="tw"><table>
+        <tr><th>Port</th><th>Use</th></tr>
+        <tr><td><code>0xE9</code></td><td>Debug console: a byte written here appears in the Console (Bochs/QEMU convention).</td></tr>
+        <tr><td><code>0xF4</code></td><td>Exit: writing a byte ends the simulation with that exit code.</td></tr>
+        <tr><td><code>0xEC</code>, <code>0xED</code></td><td>Query the cache state of a line (see <a href="#caches-port">below</a>).</td></tr>
+        <tr><td><code>0xB2</code></td><td>Raises an SMI on the writing CPU (see <a href="#smm">SMM</a>).</td></tr>
+      </table></div>
+      <h3 id="pc-linux">Booting Linux and disks</h3>
+      <pre><code>./x86sim --kernel bzImage --initrd initrd.cpio --append "console=ttyS0"
+./x86sim --smp 8 --cache --kernel bzImage --initrd initrd.cpio
+./x86sim --hda disk.img                 <span class="c"># boot from a hard disk image</span>
+./x86sim --fda floppy.img --boot a      <span class="c"># boot from a floppy</span>
+./x86sim --pc boot.o                    <span class="c"># your own boot sector, linked at 0x7C00</span></code></pre>
+      <p>Linux boots in x2APIC mode through interrupt remapping. On 8 CPUs it takes about 45 seconds; time
+        grows linearly with the number of running CPUs, and halted CPUs are cheap.</p>
+
+      <h2 id="smp">Multiple CPUs</h2>
+      <p><code>--smp N</code> gives the PC N CPUs (1–255). CPU 0 boots. The others wait for INIT and
+        STARTUP IPIs from it, exactly as on real hardware, and the ACPI MADT and MP table list them all.</p>
+      <ul>
+        <li>Each CPU has its own local APIC (APIC ID = CPU number). IPIs can be fixed, lowest-priority, NMI,
+          INIT or STARTUP, to physical or logical destinations.</li>
+        <li>The CPUs run in a deterministic round robin, one instruction each per round. LOCK-prefixed
+          instructions are therefore atomic and runs are reproducible, but plain read-modify-write sequences
+          still race, as on real hardware.</li>
+        <li>CPUID reports the topology (leaves 1 and 0xB) and the caches (leaf 4).</li>
+        <li>The limit of 255 comes from the xAPIC architecture: APIC IDs are 8 bits, and 0xFF is the
+          broadcast address.</li>
+      </ul>
+
+      <h2 id="caches">Caches and MESI</h2>
+      <p><code>--cache</code> sends every memory access through a simulated cache hierarchy. The caches hold
+        the real data, and memory is only updated on writeback, so a coherence bug would corrupt the
+        guest.</p>
+      <div class="tw"><table>
+        <tr><th>Cache</th><th>Size</th><th>Organization</th></tr>
+        <tr><td>L1 data</td><td>48 KiB per CPU</td><td>12-way, 64 sets</td></tr>
+        <tr><td>L1 instruction</td><td>32 KiB per CPU</td><td>8-way, 64 sets</td></tr>
+        <tr><td>L2</td><td>3 MiB shared</td><td>12-way, 4096 sets, inclusive</td></tr>
+      </table></div>
+      <p>Lines are 64 bytes, write-back and write-allocate, with LRU replacement. The L1s stay coherent
+        through MESI on a snooping bus:</p>
+      <div class="mesi"><span class="m">M Modified</span><span class="e">E Exclusive</span><span class="s">S Shared</span><span class="i">I Invalid</span></div>
+      <div class="tw"><table>
+        <tr><th>Bus event</th><th>When</th><th>Effect</th></tr>
+        <tr><td>BusRd</td><td>Read miss</td><td>A Modified copy elsewhere is written to the L2, and all copies become Shared. The reader gets Exclusive when no one else has the line.</td></tr>
+        <tr><td>BusRdX</td><td>Write miss</td><td>Other copies are flushed if Modified and invalidated. The writer gets Modified.</td></tr>
+        <tr><td>BusUpgr</td><td>Write hit on Shared</td><td>Other copies are invalidated without a data transfer. A write hit on Exclusive becomes Modified silently.</td></tr>
+        <tr><td>BusWB</td><td>Eviction of a Modified line</td><td>The line goes to the L2. Evicting an L2 line also invalidates the L1 copies (inclusion).</td></tr>
+      </table></div>
+      <p>The instruction caches count as sharers, so a store invalidates stale code everywhere.
+        <code>CLFLUSH</code> writes a line back and drops it; <code>WBINVD</code> and <code>INVD</code> flush
+        everything. Video memory, the BIOS ROM and memory-mapped devices are uncached.</p>
+
+      <h3 id="caches-tab">The Caches tab</h3>
+      <ul>
+        <li><b>Statistics:</b> hit rates, MESI line counts per cache, and bus traffic.</li>
+        <li><b>Line lookup:</b> enter an address to see its line's state in every cache.</li>
+        <li><b>Event log:</b> a live log of coherence events (bus transactions and snoops).</li>
+        <li><b>Contents:</b> a sets × ways grid of any cache, with line addresses colored by MESI state. It
+          marks each set's most recently used line and its next victim, and flashes lines that just changed.
+          The L2 adds an overview map of all 4096 sets.</li>
+        <li>Click a line to see its 64 bytes. Bytes that differ from main memory, i.e. written but not yet
+          written back, are highlighted.</li>
+        <li>The view refreshes while the program runs, optionally in slow motion (10 to 100,000
+          instructions per frame).</li>
+      </ul>
+
+      <h3 id="caches-port">Querying from a program</h3>
+      <p>Write a physical address to port <code>0xEC</code> as a dword, then read the dword back. It holds
+        two bits of MESI state per cache: core <i>first + k</i>'s L1D in bits 4k–4k+1, its L1I in bits
+        4k+2–4k+3, and the L2 in bits 16–17. Four cores fit in a reply; writing a byte to port
+        <code>0xED</code> selects the first core (default 0).</p>
+
+      <h2 id="cpu">CPU features</h2>
+      <h3 id="isa">Instruction set</h3>
+      <ul>
+        <li>All encodings decoded in 16-, 32- and 64-bit modes (VEX and EVEX are decoded for length).</li>
+        <li>The general-purpose integer instructions, ADX, MOVBE, CRC32.</li>
+        <li>x87 with 80-bit, correctly rounded arithmetic; MMX; SSE through SSE4.2; AES-NI, PCLMULQDQ, SHA.</li>
+      </ul>
+      <p>Anything not implemented stops with a clear <code>instruction not implemented yet: …</code> message
+        instead of misbehaving.</p>
+
+      <h3 id="system">System architecture</h3>
+      <p>Real, protected, long and virtual-8086 modes. Paging (32-bit, PAE, 4- and 5-level) with PCIDs,
+        SMEP/SMAP, and protection keys. Hardware task switching, SYSCALL/SYSENTER, XSAVE, FSGSBASE, UMIP,
+        and CET (shadow stacks and indirect-branch tracking). Exceptions are precise.</p>
+
+      <h3 id="pmu">Performance counters</h3>
+      <p>Architectural perfmon version 4: 3 fixed and 8 general 48-bit counters, global control and status,
+        <code>RDPMC</code>, and overflow interrupts (as a vector or an NMI). Events: instructions, cycles (one
+        per instruction), branches, and, with <code>--cache</code>, L1D/L1I/L2 misses and cross-core
+        transfers of Modified lines.</p>
+
+      <h3 id="tsx">Transactional memory (TSX RTM)</h3>
+      <p><code>XBEGIN</code>, <code>XEND</code>, <code>XABORT</code>, <code>XTEST</code> in PC mode. Stores
+        are buffered per cache line until <code>XEND</code> commits. A conflicting access by another CPU, an
+        exception, an interrupt, capacity (512 lines), nesting past 7 levels, or I/O, CPUID and system
+        instructions abort the transaction, with the architectural status in EAX.</p>
+
+      <h3 id="smm">System management mode</h3>
+      <p>SMIs come from port 0xB2 or from APIC IPIs with delivery mode SMI. The CPU saves its state in the
+        Intel 64 save-state map at SMBASE + 0xFE00 and enters SMM at SMBASE + 0x8000. <code>RSM</code>
+        supports SMBASE relocation and the auto-HALT restart; SMRRs hide SMRAM outside SMM. The firmware has
+        no SMI handler, so a program that raises SMIs brings its own.</p>
+
+      <h3 id="x2apic">x2APIC and VT-d interrupt remapping</h3>
+      <p>The local APICs support x2APIC mode (MSR interface, 32-bit IDs, cluster logical mode, self IPI). A
+        VT-d remapping unit, described by an ACPI DMAR table, provides interrupt remapping with x2APIC
+        destinations and queued invalidation. DMA translation is accepted but not applied, since no device
+        does bus-master DMA.</p>
+
+      <h3 id="vmx">Virtualization (VMX)</h3>
+      <p>Intel VT-x in PC mode, complete enough for Linux's KVM to run guests with all of its hardware
+        features enabled. CPUID reports VMX, and a hypervisor uses it as on real hardware: set
+        <code>CR4.VMXE</code>, lock <code>IA32_FEATURE_CONTROL</code>, then <code>VMXON</code>, set up a
+        VMCS with <code>VMWRITE</code>, and <code>VMLAUNCH</code>.</p>
+      <ul>
+        <li><b>Instructions:</b> VMXON, VMXOFF, VMCLEAR, VMPTRLD, VMPTRST, VMREAD, VMWRITE, VMLAUNCH,
+          VMRESUME, VMCALL, INVEPT, INVVPID and VMFUNC, with the architectural success and failure results
+          and error numbers.</li>
+        <li><b>VM entry</b> performs the control, host-state and guest-state checks, loads the guest, and
+          handles MSR-load lists and event injection. <b>VM exits</b> record the reason, qualification and
+          interrupt information, then load the host.</li>
+        <li><b>Exits</b> for exceptions, interrupts, NMIs, interrupt and NMI windows, triple faults, INIT,
+          CPUID, HLT, I/O, MSRs, control registers, and the other instructions VMX can intercept.</li>
+        <li><b>Memory:</b> EPT (4-level, 2 MiB and 1 GiB pages, accessed/dirty flags, execute-only pages),
+          VPID, unrestricted guests, page-modification logging, and EPTP switching.</li>
+        <li><b>Timing:</b> TSC offsetting and scaling, the VMX-preemption timer, and pause-loop exiting.</li>
+        <li><b>APIC virtualization:</b> TPR shadow, the APIC-access page, x2APIC-mode virtualization,
+          virtual-interrupt delivery, and posted interrupts.</li>
+        <li><b>Nesting support:</b> VMCS shadowing, and VMWRITE to any field.</li>
+      </ul>
+      <p>While a hypervisor runs, the debugger header shows <i>VMX root</i> or <i>VMX guest</i>. The Linux
+        test suite boots Alpine's <code>linux-virt</code> kernel, loads <code>kvm-intel.ko</code> (it reports
+        APICv, PML, the preemption timer and shadow VMCSs enabled), and runs a KVM guest that takes timer
+        and IPI interrupts.</p>
+      <div class="note warn">Not modeled: SMM dual-monitor treatment, EPT-violation #VE, sub-page
+        permissions, mode-based execute control and IPI virtualization. The capability MSRs report them as
+        absent, so software doesn't try to use them.</div>
+
+      <h2 id="terminal">Terminal debugger</h2>
+      <p><code>x86sim -d prog</code> (or <code>x86cc --debug</code>) starts a command-line debugger with the
+        same functions.</p>
+      <div class="tw"><table>
+        <tr><th>Command</th><th>What it does</th></tr>
+        <tr><td><code>s</code>, <code>step [n]</code></td><td>Execute n instructions (default 1).</td></tr>
+        <tr><td><code>n</code>, <code>next</code></td><td>Step over calls.</td></tr>
+        <tr><td><code>finish</code></td><td>Run until the current function returns.</td></tr>
+        <tr><td><code>c</code>, <code>continue</code></td><td>Run until a breakpoint, exit or fault.</td></tr>
+        <tr><td><code>b</code>, <code>break &lt;loc&gt;</code></td><td>Set a breakpoint (hex address or <code>symbol[+off]</code>).</td></tr>
+        <tr><td><code>d</code>, <code>delete &lt;loc&gt;</code></td><td>Remove a breakpoint.</td></tr>
+        <tr><td><code>bl</code></td><td>List breakpoints.</td></tr>
+        <tr><td><code>r</code>, <code>regs</code></td><td>Show the registers.</td></tr>
+        <tr><td><code>u</code>, <code>disas [loc] [n]</code></td><td>Disassemble.</td></tr>
+        <tr><td><code>x &lt;loc&gt; [len]</code></td><td>Hex dump memory.</td></tr>
+        <tr><td><code>stack [n]</code></td><td>Show stack words.</td></tr>
+        <tr><td><code>bt</code></td><td>Backtrace (frame-pointer based).</td></tr>
+        <tr><td><code>maps</code>, <code>sys</code>, <code>trace [n]</code></td><td>Memory map, recent system calls, recently executed addresses.</td></tr>
+        <tr><td><code>cpu [n]</code></td><td>List the CPUs, or show CPU n in <code>regs</code>, <code>disas</code>, <code>x</code> and <code>stack</code>.</td></tr>
+        <tr><td><code>cache [addr]</code></td><td>Cache statistics, or the MESI state of an address's line.</td></tr>
+        <tr><td><code>cachelog [n]</code></td><td>The last n coherence events.</td></tr>
+        <tr><td><code>reset</code>, <code>q</code></td><td>Reload the program; quit.</td></tr>
+      </table></div>
+
+      <h2 id="testing">Testing</h2>
+      <div class="tw"><table>
+        <tr><th>Suite</th><th>Checks</th></tr>
+        <tr><td><code>tests/run_tests.sh</code></td><td>C programs compiled natively (the reference) and for the simulator in five configurations; output and exit codes must be identical. Includes per-instruction flag checks.</td></tr>
+        <tr><td><code>tests/sys/run.sh</code></td><td>Bare-metal programs in PC mode: modes and paging, task switches, VM86, devices and boot, CET, SMP, MESI, PMU, self-modifying code, TSX, SMM, x2APIC, and VMX.</td></tr>
+        <tr><td><code>tests/asm/run.sh</code></td><td>The assembly editor's API: every example in each mode, multi-CPU loads, reset, errors.</td></tr>
+        <tr><td><code>tests/softfloat/run.sh</code></td><td>x87 arithmetic and transcendental functions against reference results.</td></tr>
+        <tr><td><code>tests/linux/run.sh</code></td><td>Boots Linux on 1, 2 and 8 CPUs, with and without caches, and runs KVM guests.</td></tr>
+      </table></div>
+
+      <h2 id="limits">Limits</h2>
+      <ul>
+        <li>Not yet implemented: AVX, AVX2, FMA and AVX-512 execution, BMI1/2, and SGX.</li>
+        <li>No microarchitecture: no pipeline, branch prediction or cycle-accurate timing. The LBR MSRs hold
+          values but record nothing.</li>
+        <li>User mode supports about 45 Linux system calls and static executables only.</li>
+        <li>At most 255 CPUs (the xAPIC limit).</li>
+      </ul>
+    </main>
+  </div>
+</body>
+</html>
